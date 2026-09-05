@@ -1,0 +1,35 @@
+{
+  "expo": {
+    "name": "AutoPilot",
+    "slug": "autopilot",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "scheme": "autopilot",
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": true,
+    "android": {
+      "package": "com.afridata.autopilot",
+      "permissions": [
+        "android.permission.QUERY_ALL_PACKAGES",
+        "android.permission.SYSTEM_ALERT_WINDOW"
+      ]
+    },
+    "plugins": [
+      "expo-router",
+      "./modules/auto-accessibility/plugin",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "ndkVersion": "27.1.12297006"
+          }
+        }
+      ],
+      "expo-asset",
+      "expo-font"
+    ],
+    "experiments": {
+      "typedRoutes": true
+    }
+  }
+}

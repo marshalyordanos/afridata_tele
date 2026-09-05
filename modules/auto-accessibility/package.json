@@ -1,0 +1,8 @@
+{
+  "name": "auto-accessibility",
+  "version": "1.0.0",
+  "description": "Native Android accessibility automation & scraping module",
+  "main": "index.ts",
+  "types": "index.ts",
+  "private": true
+}
