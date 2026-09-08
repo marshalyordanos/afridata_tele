@@ -176,6 +176,11 @@ export default function Home() {
               : `💸 Send to ${TELEBIRR_RECIPIENT.full}`}
           </Text>
         </Pressable>
+        <Link href="/telebirr" asChild>
+          <Pressable style={[styles.btn, styles.btnDark]}>
+            <Text style={styles.btnText}>Account & transactions</Text>
+          </Pressable>
+        </Link>
         <Pressable style={styles.btn} onPress={openTelebirr} disabled={!!running}>
           <Text style={styles.btnText}>Just open telebirr</Text>
         </Pressable>
@@ -286,6 +291,7 @@ const styles = StyleSheet.create({
   viewId: { color: "#6f86a8", fontSize: 11, fontFamily: "monospace" },
   err: { color: "#f87171", fontSize: 13, marginTop: 10 },
   btnGreen: { backgroundColor: "#1f7a4d" },
+  btnDark: { backgroundColor: "#233047" },
   btnViolet: { backgroundColor: "#5b3fa8" },
   input: {
     backgroundColor: "#0b0f1a",

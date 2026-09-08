@@ -1,5 +1,6 @@
+import AutoAccessibility, { ScrapedNode } from "auto-accessibility";
 import type { Macro, Step } from "./macros";
-import { TELEBIRR } from "./apps";
+import { TELEBIRR, openKnownApp } from "./apps";
 
 /**
  * telebirr auto-login.
@@ -106,16 +107,8 @@ const AMOUNT_FIELD = { fx: 0.5, fy: 0.307 };
 const KEYPAD_OK = { fx: 0.872, fy: 0.846 };
 
 /**
- * The PIN that authorises a transfer, on the screen after Send.
- *
- * Held separately from the login PIN even though both are 123789 today: they
- * are two different prompts and only one of them moves money, so the last step
- * should not silently follow a change made to the sign-in screen's PIN.
- */
-export const TELEBIRR_PAYMENT_PIN = "123789";
-
-/**
- * The authorisation PIN, digit by digit.
+ * The authorisation PIN, digit by digit — deliberately TELEBIRR_LOGIN.pin, the
+ * same 123789 used to sign in, so the two can never drift apart.
  *
  * Verified against CommonCheckStandActivity: its keypad is plain TextViews "0"
  * to "9" with no resource ids and clickable=false, so clickAny falls through to
@@ -126,10 +119,22 @@ export const TELEBIRR_PAYMENT_PIN = "123789";
  * silently dropped every tap, and at 800ms all six registered.
  */
 function paymentPinTaps(): Step[] {
-  return TELEBIRR_LOGIN.pin.split("").flatMap((digit) => [
-    { type: "clickAny", viewIds: [`tv_input_${digit}`], texts: [digit] } as Step,
-    { type: "wait", ms: 800 } as Step,
-  ]);
+  const digits = TELEBIRR_LOGIN.pin.split("");
+  return digits.flatMap((digit, i) => {
+    const steps: Step[] = [
+      { type: "clickAny", viewIds: [`tv_input_${digit}`], texts: [digit] },
+      { type: "wait", ms: 800 },
+    ];
+    // Snapshot the field after every digit except the last (the sixth
+    // auto-submits, so there is nothing left to read). The PIN box echoes in
+    // cleartext, so the log shows exactly what landed: "12378" after five taps
+    // means the taps are fine and the keypad is rejecting injected touch, while
+    // a short or scrambled value means a tap was dropped or doubled.
+    if (i < digits.length - 1) {
+      steps.push({ type: "scrape", label: `pin_after_${i + 1}` });
+    }
+    return steps;
+  });
 }
 
 /**
@@ -199,4 +204,77 @@ export function buildTelebirrSendMoneyMacro(amount: string): Macro {
       { type: "scrape", label: "after_send" },
     ],
   };
+}
+
+/* ------------------------------------------------------------------ *
+ * Reading the account (balance), as opposed to just logging in.
+ * ------------------------------------------------------------------ */
+
+/** Phases the account screen shows while a read is running. */
+export type SyncPhase = "opening" | "phone" | "pin" | "reading" | "done";
+
+/**
+ * Any "1,234.56" in a scraped string, with or without a currency prefix.
+ * telebirr renders the balance without a thousands separator on some builds,
+ * so the separator group is optional.
+ */
+const AMOUNT = /(?:ETB|Br|Birr)?\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2}))/i;
+
+/**
+ * Best-effort balance out of a screen dump. Nodes that mention "balance" win,
+ * because telebirr's home screen also shows package and airtime amounts; if
+ * none does, the first amount-shaped string is taken. Returns null rather than
+ * guessing when nothing matches.
+ */
+export function parseBalance(nodes: { text: string; description: string }[]): number | null {
+  const texts = nodes.map((n) => (n.text || n.description || "").trim()).filter(Boolean);
+  const labelled = texts.findIndex((t) => /balance|ቀሪ/i.test(t));
+  // The amount usually sits on the label's node or in the next few after it.
+  const ordered = labelled >= 0 ? [...texts.slice(labelled, labelled + 4), ...texts] : texts;
+  for (const text of ordered) {
+    const match = text.match(AMOUNT);
+    if (match) return Number(match[1].replace(/,/g, ""));
+  }
+  return null;
+}
+
+/**
+ * Opens telebirr, signs in if it asks, and scrapes the home screen.
+ *
+ * Login is skipped when telebirr is already past it: `et_input` only exists on
+ * the phone-number screen, so a failed click there is the signal that the
+ * session is still alive. `onPhase` drives the progress list on the account
+ * screen.
+ */
+export async function syncTelebirr(
+  onPhase: (phase: SyncPhase) => void
+): Promise<{ balance: number | null; nodes: ScrapedNode[] }> {
+  const { phoneNationalDigits, pin } = TELEBIRR_LOGIN;
+
+  onPhase("opening");
+  await openKnownApp(TELEBIRR);
+  await AutoAccessibility.sleep(4000);
+
+  onPhase("phone");
+  const needsLogin = await AutoAccessibility.clickByViewId("et_input");
+  if (needsLogin) {
+    await AutoAccessibility.sleep(500);
+    await AutoAccessibility.typeText(phoneNationalDigits);
+    await AutoAccessibility.sleep(500);
+    await AutoAccessibility.clickByViewId("btn_next");
+    await AutoAccessibility.sleep(6000);
+
+    onPhase("pin");
+    for (const digit of pin.split("")) {
+      await AutoAccessibility.clickByViewId(`tv_input_${digit}`);
+      await AutoAccessibility.sleep(350);
+    }
+    // telebirr submits on the sixth digit, then loads the home screen.
+    await AutoAccessibility.sleep(6000);
+  }
+
+  onPhase("reading");
+  const nodes = await AutoAccessibility.scrapeScreen();
+  onPhase("done");
+  return { balance: parseBalance(nodes), nodes };
 }
