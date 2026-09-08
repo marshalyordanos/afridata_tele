@@ -105,11 +105,30 @@ export const TELEBIRR_RECIPIENT = {
 const AMOUNT_FIELD = { fx: 0.5, fy: 0.307 };
 const KEYPAD_OK = { fx: 0.872, fy: 0.846 };
 
-/** The authorisation PIN, digit by digit, id first and label second. */
+/**
+ * The PIN that authorises a transfer, on the screen after Send.
+ *
+ * Held separately from the login PIN even though both are 123789 today: they
+ * are two different prompts and only one of them moves money, so the last step
+ * should not silently follow a change made to the sign-in screen's PIN.
+ */
+export const TELEBIRR_PAYMENT_PIN = "123789";
+
+/**
+ * The authorisation PIN, digit by digit.
+ *
+ * Verified against CommonCheckStandActivity: its keypad is plain TextViews "0"
+ * to "9" with no resource ids and clickable=false, so clickAny falls through to
+ * tapping the centre of the digit's label. The tv_input_* ids are tried first
+ * only because the login keypad uses them.
+ *
+ * 800ms between digits, not the login screen's 350: at 400ms this keypad
+ * silently dropped every tap, and at 800ms all six registered.
+ */
 function paymentPinTaps(): Step[] {
   return TELEBIRR_LOGIN.pin.split("").flatMap((digit) => [
     { type: "clickAny", viewIds: [`tv_input_${digit}`], texts: [digit] } as Step,
-    { type: "wait", ms: 350 } as Step,
+    { type: "wait", ms: 800 } as Step,
   ]);
 }
 
