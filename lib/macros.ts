@@ -9,9 +9,10 @@ export type Step =
   // `label` is a last-resort match on the app's on-device name.
   | { type: "openApp"; pkg: string; alt?: string[]; label?: string }
   | { type: "clickText"; text: string }
-  // Tries each label in turn and clicks the first one actually on screen, for
-  // buttons whose wording moves between builds ("OK" / "Confirm" / "Done").
-  | { type: "clickAnyText"; texts: string[] }
+  // Clicks the first candidate actually on screen — view ids first, then exact
+  // labels. For a control that is identified differently from screen to screen:
+  // telebirr's login keypad has view ids, its checkout screens have none at all.
+  | { type: "clickAny"; viewIds?: string[]; texts?: string[] }
   | { type: "clickViewId"; viewId: string }
   | { type: "tap"; x: number; y: number }
   // A tap placed as a fraction of the screen (0..1), so it survives a change of
@@ -90,9 +91,15 @@ async function onScreen(
  * label has to match a whole node, and the node's own id (or its centre point,
  * for a button that carries no id) is what gets clicked.
  */
-async function clickExact(labels: string[]): Promise<string> {
+async function clickExact(
+  step: Extract<Step, { type: "clickAny" }>,
+): Promise<string> {
+  for (const id of step.viewIds ?? []) {
+    if (await AutoAccessibility.clickByViewId(id)) return id;
+  }
+  if (!step.texts?.length) return "";
   const nodes = await AutoAccessibility.scrapeScreen();
-  for (const label of labels) {
+  for (const label of step.texts) {
     const needle = label.trim().toLowerCase();
     const node = nodes.find((n) =>
       [n.text, n.description].some((v) => v.trim().toLowerCase() === needle),
@@ -126,12 +133,13 @@ export async function runMacro(macro: Macro): Promise<RunResult> {
           await AutoAccessibility.sleep(800);
           break;
         }
-        case "clickAnyText": {
-          const hit = await clickExact(step.texts);
+        case "clickAny": {
+          const hit = await clickExact(step);
+          const tried = [...(step.viewIds ?? []), ...(step.texts ?? [])];
           log.push(
             hit
               ? `${tag} → "${hit}" clicked`
-              : `${tag} → NONE of [${step.texts.join(", ")}] on screen`,
+              : `${tag} → NONE of [${tried.join(", ")}] on screen`,
           );
           await AutoAccessibility.sleep(800);
           break;

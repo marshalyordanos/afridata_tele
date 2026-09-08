@@ -105,6 +105,14 @@ export const TELEBIRR_RECIPIENT = {
 const AMOUNT_FIELD = { fx: 0.5, fy: 0.307 };
 const KEYPAD_OK = { fx: 0.872, fy: 0.846 };
 
+/** The authorisation PIN, digit by digit, id first and label second. */
+function paymentPinTaps(): Step[] {
+  return TELEBIRR_LOGIN.pin.split("").flatMap((digit) => [
+    { type: "clickAny", viewIds: [`tv_input_${digit}`], texts: [digit] } as Step,
+    { type: "wait", ms: 350 } as Step,
+  ]);
+}
+
 /**
  * Sign in, then drive a transfer end to end:
  * home -> "Send Money" -> "Individual" -> recipient -> Next -> amount -> Send.
@@ -157,8 +165,18 @@ export function buildTelebirrSendMoneyMacro(amount: string): Macro {
       // inside the green button.
       { type: "waitFor", text: "Send", timeoutMs: 15000 },
       { type: "scrape", label: "before_send" },
-      { type: "clickAnyText", texts: ["Send"] },
-      { type: "wait", ms: 3000 },
+      { type: "clickAny", texts: ["Send"] },
+      // ---- authorisation ----
+      // Send raises a PIN screen, and the transfer only happens once it is
+      // filled. Same PIN as the login screen. Which keypad appears here is not
+      // verified: the login screen's has tv_input_* ids, while the rest of the
+      // checkout module carries no ids whatsoever, so each digit tries the id
+      // first and falls back to tapping the plain "7" label. The digits are
+      // matched exactly, so "1" cannot land on a "1.00ETB" amount.
+      { type: "waitFor", text: "1", timeoutMs: 15000 },
+      { type: "scrape", label: "payment_pin_screen" },
+      ...paymentPinTaps(),
+      { type: "wait", ms: 5000 },
       { type: "scrape", label: "after_send" },
     ],
   };
