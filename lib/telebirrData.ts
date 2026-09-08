@@ -54,6 +54,8 @@ export interface TelebirrSnapshot {
   /** Nine national digits, no +251 prefix — same form telebirr's field wants. */
   phoneNationalDigits: string;
   accountKind: string;
+  /** Where the one-tap send goes: nine digits after +251, empty until set. */
+  sendRecipientDigits: string;
   /** Epoch ms of the last successful read, or null. */
   readAt: number | null;
   transactions: TelebirrTransaction[];
@@ -107,6 +109,7 @@ export const EMPTY_SNAPSHOT: TelebirrSnapshot = {
   balance: 12480.65,
   phoneNationalDigits: "986680094",
   accountKind: "Personal",
+  sendRecipientDigits: "",
   readAt: null,
   transactions: SAMPLE_TRANSACTIONS,
 };

@@ -7,14 +7,21 @@ import {
   StyleSheet,
   Share,
   ActivityIndicator,
+  TextInput,
+  Alert,
 } from "react-native";
 import { useRouter } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
 import AutoAccessibility from "auto-accessibility";
 import { TELEBIRR, openKnownApp } from "../lib/apps";
-import { runMacro } from "../lib/macros";
-import { buildTelebirrLoginMacro, syncTelebirr, SyncPhase } from "../lib/telebirr";
+import {
+  syncTelebirr,
+  signInAndSend,
+  SEND_AMOUNT_BIRR,
+  SyncPhase,
+  SendPhase,
+} from "../lib/telebirr";
 import {
   loadSnapshot,
   saveSnapshot,
@@ -29,12 +36,31 @@ import {
 } from "../lib/telebirrData";
 import { C, R, CARD_SHADOW, TABULAR } from "../lib/theme";
 
+interface Step {
+  phase: SyncPhase | SendPhase;
+  label: string;
+  hook: string;
+}
+
 /** The read, broken into the four things the user can actually watch happen. */
-const STEPS: { phase: SyncPhase; label: string; hook: string }[] = [
+const STEPS: Step[] = [
   { phase: "opening", label: "Opening telebirr", hook: TELEBIRR.packages[0] },
   { phase: "phone", label: "Filling number", hook: "et_input" },
   { phase: "pin", label: "Entering PIN", hook: "tv_input_*" },
-  { phase: "reading", label: "Reading balance", hook: "scrapeScreen" },
+  { phase: "reading", label: "Reading balance & receipts", hook: "scrapeScreen" },
+  { phase: "returning", label: "Back to AutoPilot", hook: "openApp" },
+];
+
+/** The send, same idea — every step names the selector it drives. */
+const SEND_STEPS: Step[] = [
+  { phase: "opening", label: "Opening telebirr", hook: TELEBIRR.packages[0] },
+  { phase: "login", label: "Signing in", hook: "et_input · tv_input_*" },
+  { phase: "menu", label: "Opening Send Money", hook: "by text" },
+  { phase: "recipient", label: "Entering the number", hook: "et_input" },
+  { phase: "amount", label: `Entering ${SEND_AMOUNT_BIRR}.00`, hook: "et_input" },
+  { phase: "confirm", label: "Confirming", hook: "by text" },
+  { phase: "pin", label: "Authorising with PIN", hook: "tv_input_*" },
+  { phase: "returning", label: "Back to AutoPilot", hook: "openApp" },
 ];
 
 export default function TelebirrAccount() {
@@ -45,7 +71,9 @@ export default function TelebirrAccount() {
   const [masked, setMasked] = useState(false);
   const [phase, setPhase] = useState<SyncPhase | null>(null);
   const [autoSync, setAutoSync] = useState(true);
-  const [signingIn, setSigningIn] = useState(false);
+  const [sendPhase, setSendPhase] = useState<SendPhase | null>(null);
+  const [recipientDraft, setRecipientDraft] = useState("");
+  const [editingRecipient, setEditingRecipient] = useState(false);
   const [error, setError] = useState("");
   const alive = useRef(true);
   // Ref to the latest sync so the once-on-open effect can call it without
@@ -54,7 +82,10 @@ export default function TelebirrAccount() {
   const didAutoSync = useRef(false);
 
   useEffect(() => {
-    loadSnapshot().then(setSnapshot);
+    loadSnapshot().then((loaded) => {
+      setSnapshot(loaded);
+      setRecipientDraft(loaded.sendRecipientDigits);
+    });
     return () => {
       alive.current = false;
     };
@@ -80,17 +111,25 @@ export default function TelebirrAccount() {
   }, [autoSync]);
 
   const syncing = phase !== null && phase !== "done";
-  const stepIndex = phase ? STEPS.findIndex((s) => s.phase === phase) : -1;
-  const doneIndex = phase === "done" ? STEPS.length : stepIndex;
+  const sending = sendPhase !== null && sendPhase !== "done";
+  const busy = syncing || sending;
+  const steps = sending ? SEND_STEPS : STEPS;
+  const activePhase: SyncPhase | SendPhase | null = sending ? sendPhase : phase;
+  const stepIndex = activePhase ? steps.findIndex((step) => step.phase === activePhase) : -1;
+  const doneIndex = activePhase === "done" ? steps.length : stepIndex;
 
   const sync = useCallback(async () => {
-    if (syncing) return;
+    if (busy) return;
     setError("");
     try {
-      const { balance } = await syncTelebirr((p) => alive.current && setPhase(p));
+      const { balance, transactions } = await syncTelebirr(
+        (p) => alive.current && setPhase(p)
+      );
       const next: TelebirrSnapshot = {
         ...snapshot,
         balance: balance ?? snapshot.balance,
+        // Keep the last real list if this read came back empty.
+        transactions: transactions.length ? transactions : snapshot.transactions,
         readAt: Date.now(),
       };
       setSnapshot(next);
@@ -101,18 +140,55 @@ export default function TelebirrAccount() {
     } finally {
       if (alive.current) setPhase(null);
     }
-  }, [snapshot, syncing]);
+  }, [snapshot, busy]);
 
   // Always call through this, so the auto-sync effect reaches the current sync.
   syncRef.current = sync;
 
-  const signIn = useCallback(async () => {
-    setSigningIn(true);
+  const saveRecipient = useCallback(async () => {
+    const digits = recipientDraft.replace(/\D/g, "").slice(-9);
+    const next = { ...snapshot, sendRecipientDigits: digits };
+    setRecipientDraft(digits);
+    setSnapshot(next);
+    setEditingRecipient(false);
+    await saveSnapshot(next);
+  }, [recipientDraft, snapshot]);
+
+  const runSend = useCallback(async () => {
     setError("");
-    const result = await runMacro(buildTelebirrLoginMacro());
-    if (!result.ok) setError(result.log[result.log.length - 1] ?? "Sign-in failed.");
-    setSigningIn(false);
-  }, []);
+    setSendPhase("opening");
+    const result = await signInAndSend(
+      snapshot.sendRecipientDigits,
+      SEND_AMOUNT_BIRR,
+      (p) => alive.current && setSendPhase(p)
+    );
+    if (!alive.current) return;
+    setSendPhase(null);
+    if (result.ok) {
+      // The balance just moved, so read it back rather than trusting the old one.
+      syncRef.current();
+    } else {
+      setError(result.log.slice(-2).join(" · "));
+    }
+  }, [snapshot.sendRecipientDigits]);
+
+  // Real money leaves the account here, so the tap is confirmed first.
+  const sendOneBirr = useCallback(() => {
+    const to = snapshot.sendRecipientDigits;
+    if (to.length < 9) {
+      setEditingRecipient(true);
+      setError("Add the number to send to first.");
+      return;
+    }
+    Alert.alert(
+      `Send ${SEND_AMOUNT_BIRR}.00 ETB?`,
+      `AutoPilot will sign in to telebirr and send ETB ${SEND_AMOUNT_BIRR}.00 to ${maskPhone(to)}.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        { text: `Send ${SEND_AMOUNT_BIRR} br`, style: "destructive", onPress: runSend },
+      ]
+    );
+  }, [snapshot.sendRecipientDigits, runSend]);
 
   const openApp = useCallback(async () => {
     setError("");
@@ -189,20 +265,10 @@ export default function TelebirrAccount() {
             <Text style={s.dim}>{syncing ? "Keep the screen on" : "Balance and receipts"}</Text>
           </View>
 
-          {/* Kept from the dashboard, as a small button. */}
-          <Pressable
-            style={({ pressed }) => [s.smallBtn, pressed && s.pressed]}
-            onPress={signIn}
-            disabled={signingIn || syncing}
-          >
-            <Feather name="lock" size={13} color={C.dim} />
-            <Text style={s.smallBtnText}>{signingIn ? "…" : "Sign in"}</Text>
-          </Pressable>
-
           <Pressable
             style={({ pressed }) => [s.primaryBtn, pressed && s.pressed]}
             onPress={sync}
-            disabled={syncing}
+            disabled={busy}
           >
             {syncing ? (
               <ActivityIndicator size="small" color="#fff" />
@@ -212,12 +278,65 @@ export default function TelebirrAccount() {
             <Text style={s.primaryBtnText}>{syncing ? "Reading" : "Sync now"}</Text>
           </Pressable>
         </View>
+
+        <View style={s.divider} />
+
+        {/* One tap: sign in and send. The number it goes to lives here. */}
+        <View style={s.sendRow}>
+          <Feather name="send" size={14} color={C.dim} />
+          <Text style={s.dim}>To</Text>
+          {editingRecipient || !snapshot.sendRecipientDigits ? (
+            <>
+              <Text style={s.phone}>+251</Text>
+              <TextInput
+                style={s.recipientInput}
+                value={recipientDraft}
+                onChangeText={setRecipientDraft}
+                onBlur={saveRecipient}
+                onSubmitEditing={saveRecipient}
+                placeholder="9XXXXXXXX"
+                placeholderTextColor={C.faint}
+                keyboardType="number-pad"
+                maxLength={9}
+                returnKeyType="done"
+                autoFocus={editingRecipient}
+              />
+              <Pressable onPress={saveRecipient} hitSlop={8}>
+                <Text style={s.smallLink}>save</Text>
+              </Pressable>
+            </>
+          ) : (
+            <>
+              <Text style={[s.phone, { flex: 1 }]}>
+                {maskPhone(snapshot.sendRecipientDigits)}
+              </Text>
+              <Pressable onPress={() => setEditingRecipient(true)} hitSlop={8}>
+                <Text style={s.smallLink}>change</Text>
+              </Pressable>
+            </>
+          )}
+        </View>
+
+        <Pressable
+          style={({ pressed }) => [s.sendBtn, pressed && s.pressed]}
+          onPress={sendOneBirr}
+          disabled={busy}
+        >
+          {sending ? (
+            <ActivityIndicator size="small" color={C.accent} />
+          ) : (
+            <Feather name="send" size={15} color={C.accent} />
+          )}
+          <Text style={s.sendBtnText}>
+            {sending ? "Sending…" : `Sign in & send ${SEND_AMOUNT_BIRR} br`}
+          </Text>
+        </Pressable>
       </View>
 
       {/* Progress while reading, quick actions when idle */}
-      {syncing ? (
+      {busy ? (
         <View style={[s.card, s.progressCard]}>
-          {STEPS.map((step, i) => {
+          {steps.map((step, i) => {
             const done = i < doneIndex;
             const active = i === stepIndex;
             return (
@@ -398,6 +517,32 @@ const s = StyleSheet.create({
     backgroundColor: C.surfaceAlt,
   },
   smallBtnText: { fontSize: 12, fontWeight: "600", color: C.dim },
+  smallLink: { fontSize: 12, fontWeight: "600", color: C.accent },
+  sendRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  recipientInput: {
+    flex: 1,
+    height: 34,
+    paddingHorizontal: 8,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: C.border,
+    backgroundColor: C.surfaceAlt,
+    color: C.text,
+    fontSize: 13,
+    fontFamily: "monospace",
+  },
+  sendBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    height: 40,
+    borderRadius: R.btn,
+    backgroundColor: C.accentSoft,
+    borderWidth: 1,
+    borderColor: "#bfd2ff",
+  },
+  sendBtnText: { fontSize: 13, fontWeight: "600", color: C.accent },
   primaryBtn: {
     flexDirection: "row",
     alignItems: "center",

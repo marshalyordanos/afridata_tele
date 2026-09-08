@@ -1,6 +1,8 @@
 import { Dimensions, PixelRatio } from "react-native";
+import Constants from "expo-constants";
 import AutoAccessibility, { ScrapedNode } from "auto-accessibility";
 import type { Macro, Step } from "./macros";
+import type { TelebirrTransaction } from "./telebirrData";
 import { TELEBIRR, openKnownApp } from "./apps";
 
 /**
@@ -212,7 +214,20 @@ export function buildTelebirrSendMoneyMacro(amount: string): Macro {
  * ------------------------------------------------------------------ */
 
 /** Phases the account screen shows while a read is running. */
-export type SyncPhase = "opening" | "phone" | "pin" | "reading" | "done";
+export type SyncPhase = "opening" | "phone" | "pin" | "reading" | "returning" | "done";
+
+/**
+ * AutoPilot's own package id, read from the Expo config so it follows a rename.
+ * Driving telebirr leaves telebirr in front, so every run hands the screen back.
+ */
+const OWN_PACKAGE =
+  (Constants.expoConfig?.android?.package as string | undefined) ?? "com.afridata.autopilot";
+
+/** Brings AutoPilot back to the foreground after a run in telebirr. */
+async function returnToAutoPilot(): Promise<void> {
+  await AutoAccessibility.openApp(OWN_PACKAGE);
+  await AutoAccessibility.sleep(1200);
+}
 
 /**
  * Any "1,234.56" in a scraped string, with or without a currency prefix.
@@ -248,6 +263,78 @@ export function balanceIsMasked(nodes: { text: string; description: string }[]):
   return nodes.some((n) => /^\*{3,}$/.test((n.text || n.description || "").trim()));
 }
 
+/** "DD-MM-YYYY HH:MM" as telebirr's Transaction History prints each row's time. */
+const TX_DATETIME = /^(\d{2})-(\d{2})-(\d{4})\s+(\d{2}:\d{2})$/;
+/** "+500.00" / "-1.00" — the signed amount node that follows the date. */
+const TX_AMOUNT = /^([+-])\s*([0-9][0-9,]*\.[0-9]{2})$/;
+
+/** A short category from telebirr's transaction label, for the coloured chip. */
+function deriveKind(name: string): string {
+  const n = name.toLowerCase();
+  if (n.includes("cash in")) return "Cash In";
+  if (n.includes("cash out") || n.includes("withdraw")) return "Withdrawal";
+  if (n.includes("transfer")) return "Transfer";
+  if (n.includes("package")) return "Package";
+  if (n.includes("merchant")) return "Merchant";
+  if (n.includes("bill")) return "Bill";
+  if (n.includes("airtime")) return "Airtime";
+  if (n.includes("receive")) return "Received";
+  return name;
+}
+
+/**
+ * Transactions out of telebirr's "Transaction History" mini-app screen.
+ *
+ * Verified live against the macle mini-program (SingleProcessActivity). Its
+ * rows come through the accessibility tree in document order as four
+ * consecutive text nodes — name, "DD-MM-YYYY HH:MM", signed amount, "ETB" —
+ * with month headers ("September", "August") and the Pay/Income/Total summary
+ * interleaved. Anchoring on the date node is what keeps the summary figures
+ * (which have no date) out of the list.
+ *
+ * The list screen shows no receipt id, fee or running balance — those live on
+ * each receipt's own detail screen — so those fields are left blank here and
+ * filled in when a row is opened.
+ */
+export function parseTransactions(
+  nodes: { text: string; description: string }[]
+): TelebirrTransaction[] {
+  const texts = nodes.map((n) => (n.text || n.description || "").trim());
+  const out: TelebirrTransaction[] = [];
+  for (let i = 0; i < texts.length; i++) {
+    const when = texts[i].match(TX_DATETIME);
+    if (!when) continue;
+    // The amount is the next signed node within a step or two of the date.
+    let value: number | null = null;
+    for (let j = i + 1; j < Math.min(i + 3, texts.length); j++) {
+      const amt = texts[j].match(TX_AMOUNT);
+      if (amt) {
+        value = Number(amt[2].replace(/,/g, "")) * (amt[1] === "-" ? -1 : 1);
+        break;
+      }
+    }
+    if (value === null) continue;
+    // The label sits just before the date; guard against a month/summary node.
+    const label = texts[i - 1] ?? "";
+    const name = label && !/\(ETB\)$/.test(label) ? label : "Transaction";
+    const [, dd, mm, yyyy, hhmm] = when;
+    const date = `${dd}-${mm}-${yyyy}`;
+    out.push({
+      id: `${date}_${hhmm}_${value}_${out.length}`,
+      day: date,
+      time: hhmm,
+      kind: deriveKind(name),
+      name,
+      value,
+      receipt: "",
+      charge: "",
+      balanceAfter: "",
+      status: "",
+    });
+  }
+  return out;
+}
+
 /**
  * The eye toggle beside "Balance (ETB)" that reveals the hidden amount, as a
  * fraction of the screen. Measured on the TECNO CD6 home (homev6.HomeActivity):
@@ -263,6 +350,14 @@ async function tapFraction(fx: number, fy: number): Promise<void> {
   const x = PixelRatio.getPixelSizeForLayoutSize(screen.width * fx);
   const y = PixelRatio.getPixelSizeForLayoutSize(screen.height * fy);
   await AutoAccessibility.tap(x, y);
+}
+
+/** A short upward swipe, to bring below-the-fold home tiles into view. */
+async function swipeUp(): Promise<void> {
+  const screen = Dimensions.get("screen");
+  const px = (v: number) => PixelRatio.getPixelSizeForLayoutSize(v);
+  const x = px(screen.width * 0.5);
+  await AutoAccessibility.swipe(x, px(screen.height * 0.7), x, px(screen.height * 0.3), 400);
 }
 
 /** Text seen only before login, used to decide whether a sign-in is needed. */
@@ -293,7 +388,11 @@ async function tapDigit(digit: string): Promise<void> {
  */
 export async function syncTelebirr(
   onPhase: (phase: SyncPhase) => void
-): Promise<{ balance: number | null; nodes: ScrapedNode[] }> {
+): Promise<{
+  balance: number | null;
+  transactions: TelebirrTransaction[];
+  nodes: ScrapedNode[];
+}> {
   const { pin } = TELEBIRR_LOGIN;
 
   onPhase("opening");
@@ -324,7 +423,184 @@ export async function syncTelebirr(
     await AutoAccessibility.sleep(1200);
     nodes = await AutoAccessibility.scrapeScreen();
   }
+  const balance = parseBalance(nodes);
+
+  // Then read the receipts from the "Transaction Details" tile, which opens
+  // telebirr's Transaction History mini-app. The tile sits below the fold on
+  // home, so a swipe up is what brings it into the accessibility tree for
+  // clickByText to find.
+  let transactions: TelebirrTransaction[] = [];
+  await swipeUp();
+  await AutoAccessibility.sleep(700);
+  if (await AutoAccessibility.clickByText("Transaction Details")) {
+    // The mini-app is an H5 surface and needs a beat to render its list.
+    await AutoAccessibility.sleep(6000);
+    transactions = parseTransactions(await AutoAccessibility.scrapeScreen());
+    // Leave the mini-app so the next open starts from home again.
+    await AutoAccessibility.pressBack();
+    await AutoAccessibility.sleep(1500);
+  }
+
+  // The read is done in telebirr; put AutoPilot back in front of the user.
+  onPhase("returning");
+  await returnToAutoPilot();
 
   onPhase("done");
-  return { balance: parseBalance(nodes), nodes };
+  return { balance, transactions, nodes };
+}
+
+/* ------------------------------------------------------------------ *
+ * Sending money.
+ *
+ * WARNING — this moves real money out of the account. Only the LOGIN
+ * selectors below are verified against telebirr 1.3.2; the send screens are
+ * driven by on-screen TEXT (clickByText), because their view-ids have not been
+ * confirmed on a device yet. Every step reports what it matched, and the run
+ * stops at the first step it cannot find rather than blindly tapping on
+ * whatever screen happens to be showing — a stray tap on a payment screen is
+ * exactly what must not happen. Use Live Scrape on each send screen to read the
+ * real labels/ids and tighten these lists.
+ * ------------------------------------------------------------------ */
+
+/** The amount the one-tap button sends. */
+export const SEND_AMOUNT_BIRR = "1";
+
+/** Label candidates, most likely first — builds and locales differ. */
+const SEND_MENU_LABELS = ["Send Money", "Send money", "SendMoney", "Send", "Transfer"];
+const NEXT_LABELS = ["Next", "NEXT", "Continue", "CONTINUE", "Proceed"];
+const CONFIRM_LABELS = ["Confirm", "CONFIRM", "Send", "SEND", "Pay", "PAY", "OK"];
+
+export type SendPhase =
+  | "opening"
+  | "login"
+  | "menu"
+  | "recipient"
+  | "amount"
+  | "confirm"
+  | "pin"
+  | "returning"
+  | "done";
+
+export interface SendResult {
+  ok: boolean;
+  /** Every step, in order, with what it matched — shown to the user on failure. */
+  log: string[];
+  failedAt?: SendPhase;
+}
+
+/** Clicks the first candidate that exists on screen; returns which one, or null. */
+async function clickAnyText(candidates: string[]): Promise<string | null> {
+  for (const label of candidates) {
+    if (await AutoAccessibility.clickByText(label)) return label;
+  }
+  return null;
+}
+
+/** Taps a six-digit PIN on telebirr's custom keypad (tv_input_0..9). */
+async function tapPin(pin: string): Promise<void> {
+  for (const digit of pin.split("")) {
+    await AutoAccessibility.clickByViewId(`tv_input_${digit}`);
+    await AutoAccessibility.sleep(350);
+  }
+}
+
+/**
+ * One tap: open telebirr, sign in if it asks, and send `amountBirr` to
+ * `recipientNationalDigits` (the nine digits after +251).
+ */
+export async function signInAndSend(
+  recipientNationalDigits: string,
+  amountBirr: string,
+  onPhase: (phase: SendPhase) => void
+): Promise<SendResult> {
+  const { phoneNationalDigits, pin } = TELEBIRR_LOGIN;
+  const log: string[] = [];
+  const stop = (phase: SendPhase, message: string): SendResult => {
+    log.push(`✗ ${message}`);
+    return { ok: false, log, failedAt: phase };
+  };
+
+  try {
+    onPhase("opening");
+    const pkg = await openKnownApp(TELEBIRR);
+    log.push(`opened ${pkg}`);
+    await AutoAccessibility.sleep(4000);
+
+    // et_input only exists on the phone-number screen: its absence means the
+    // session is still alive and login can be skipped.
+    onPhase("login");
+    if (await AutoAccessibility.clickByViewId("et_input")) {
+      await AutoAccessibility.sleep(500);
+      await AutoAccessibility.typeText(phoneNationalDigits);
+      await AutoAccessibility.sleep(500);
+      if (!(await AutoAccessibility.clickByViewId("btn_next"))) {
+        return stop("login", "sign-in: btn_next not found");
+      }
+      await AutoAccessibility.sleep(6000);
+      await tapPin(pin);
+      await AutoAccessibility.sleep(6000);
+      log.push("signed in");
+    } else {
+      log.push("already signed in");
+    }
+
+    onPhase("menu");
+    const menu = await clickAnyText(SEND_MENU_LABELS);
+    if (!menu) {
+      return stop("menu", `no Send Money entry found (tried ${SEND_MENU_LABELS.join(", ")})`);
+    }
+    log.push(`tapped "${menu}"`);
+    await AutoAccessibility.sleep(3000);
+
+    onPhase("recipient");
+    // The recipient screen reuses et_input on the builds seen so far; if that
+    // id is gone the field cannot be targeted safely, so stop.
+    if (!(await AutoAccessibility.clickByViewId("et_input"))) {
+      return stop("recipient", "recipient field (et_input) not found on the send screen");
+    }
+    await AutoAccessibility.sleep(500);
+    await AutoAccessibility.typeText(recipientNationalDigits);
+    log.push(`typed recipient ${recipientNationalDigits}`);
+    await AutoAccessibility.sleep(500);
+    if (!(await AutoAccessibility.clickByViewId("btn_next")) && !(await clickAnyText(NEXT_LABELS))) {
+      return stop("recipient", "no Next button after the recipient");
+    }
+    await AutoAccessibility.sleep(3000);
+
+    onPhase("amount");
+    if (!(await AutoAccessibility.clickByViewId("et_input"))) {
+      return stop("amount", "amount field (et_input) not found");
+    }
+    await AutoAccessibility.sleep(500);
+    await AutoAccessibility.typeText(amountBirr);
+    log.push(`typed amount ${amountBirr}`);
+    await AutoAccessibility.sleep(500);
+    if (!(await AutoAccessibility.clickByViewId("btn_next")) && !(await clickAnyText(NEXT_LABELS))) {
+      return stop("amount", "no Next button after the amount");
+    }
+    await AutoAccessibility.sleep(3000);
+
+    onPhase("confirm");
+    const confirm = await clickAnyText(CONFIRM_LABELS);
+    if (!confirm) {
+      return stop("confirm", `no confirm button (tried ${CONFIRM_LABELS.join(", ")})`);
+    }
+    log.push(`tapped "${confirm}"`);
+    await AutoAccessibility.sleep(3000);
+
+    // telebirr asks for the PIN again to authorise the transfer.
+    onPhase("pin");
+    await tapPin(pin);
+    log.push("entered PIN");
+    await AutoAccessibility.sleep(5000);
+
+    onPhase("returning");
+    await returnToAutoPilot();
+
+    onPhase("done");
+    log.push(`sent ETB ${amountBirr} to +251${recipientNationalDigits}`);
+    return { ok: true, log };
+  } catch (e: any) {
+    return stop("opening", e?.message ?? String(e));
+  }
 }
