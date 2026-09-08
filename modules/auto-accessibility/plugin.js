@@ -29,7 +29,11 @@ const withServiceManifest = (config) =>
           "android:name":
             "expo.modules.autoaccessibility.AutoAccessibilityService",
           "android:permission": "android.permission.BIND_ACCESSIBILITY_SERVICE",
-          "android:exported": "false",
+          // Must be exported: the system server runs in another process and has to
+          // bind this service. A non-exported one is never even resolved, so it
+          // does not show up in Accessibility settings. Requiring
+          // BIND_ACCESSIBILITY_SERVICE is what keeps other apps from binding it.
+          "android:exported": "true",
         },
         "intent-filter": [
           {

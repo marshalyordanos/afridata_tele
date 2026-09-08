@@ -29,6 +29,10 @@ const AutoAccessibility = {
   openApp(pkg: string): Promise<void> {
     return Native.openApp(pkg);
   },
+  /** Package id for a package/app-name query, or "" when nothing matches. */
+  resolveApp(query: string): Promise<string> {
+    return Native.resolveApp(query);
+  },
   async listApps(): Promise<InstalledApp[]> {
     return JSON.parse(await Native.listApps());
   },
