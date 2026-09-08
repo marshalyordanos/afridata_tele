@@ -1,3 +1,4 @@
+import { Dimensions, PixelRatio } from "react-native";
 import AutoAccessibility, { ScrapedNode } from "auto-accessibility";
 import type { Macro, Step } from "./macros";
 import { TELEBIRR, openKnownApp } from "./apps";
@@ -225,6 +226,10 @@ const AMOUNT = /(?:ETB|Br|Birr)?\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2}))/i;
  * because telebirr's home screen also shows package and airtime amounts; if
  * none does, the first amount-shaped string is taken. Returns null rather than
  * guessing when nothing matches.
+ *
+ * Returns null too when the balance is still masked as "******" — the home
+ * screen hides it by default (see BALANCE_EYE), and no amount is on screen
+ * until the eye is tapped.
  */
 export function parseBalance(nodes: { text: string; description: string }[]): number | null {
   const texts = nodes.map((n) => (n.text || n.description || "").trim()).filter(Boolean);
@@ -238,43 +243,88 @@ export function parseBalance(nodes: { text: string; description: string }[]): nu
   return null;
 }
 
+/** True while the home screen is still hiding the balance behind asterisks. */
+export function balanceIsMasked(nodes: { text: string; description: string }[]): boolean {
+  return nodes.some((n) => /^\*{3,}$/.test((n.text || n.description || "").trim()));
+}
+
 /**
- * Opens telebirr, signs in if it asks, and scrapes the home screen.
+ * The eye toggle beside "Balance (ETB)" that reveals the hidden amount, as a
+ * fraction of the screen. Measured on the TECNO CD6 home (homev6.HomeActivity):
+ * the eye sat at (494, 302) on 720x1600. It has no id or text, so a positional
+ * tap is the only way to hit it. If a sync keeps reporting a masked balance,
+ * re-measure this against a screenshot.
+ */
+const BALANCE_EYE = { fx: 494 / 720, fy: 302 / 1600 };
+
+/** A screen-fraction tap, in the physical pixels dispatchGesture expects. */
+async function tapFraction(fx: number, fy: number): Promise<void> {
+  const screen = Dimensions.get("screen");
+  const x = PixelRatio.getPixelSizeForLayoutSize(screen.width * fx);
+  const y = PixelRatio.getPixelSizeForLayoutSize(screen.height * fy);
+  await AutoAccessibility.tap(x, y);
+}
+
+/** Text seen only before login, used to decide whether a sign-in is needed. */
+function looksLikeLogin(nodes: ScrapedNode[]): boolean {
+  return nodes.some((n) =>
+    /mobile number|welcome to telebirr|^login$/i.test((n.text || "").trim())
+  );
+}
+
+/** Taps a digit by its keypad view-id, or by its plain label when there is none. */
+async function tapDigit(digit: string): Promise<void> {
+  if (await AutoAccessibility.clickByViewId(`tv_input_${digit}`)) return;
+  await AutoAccessibility.clickByText(digit);
+}
+
+/**
+ * Opens telebirr, signs in if it asks, reveals the balance, and scrapes home.
  *
- * Login is skipped when telebirr is already past it: `et_input` only exists on
- * the phone-number screen, so a failed click there is the signal that the
- * session is still alive. `onPhase` drives the progress list on the account
- * screen.
+ * Rewritten against telebirr 1.3.2 as it actually behaves on-device, where the
+ * older assumptions broke:
+ *   - LoginFirstActivity's number field and Next button carry NO view-ids, so
+ *     login is detected by the on-screen text ("Mobile Number"), not by probing
+ *     for et_input. The number is already prefilled, so we only tap Next.
+ *   - PinOfLoginActivity's keypad also has no tv_input_* ids on this build; the
+ *     digits are plain "1".."9" labels, so tapDigit falls back to clickByText.
+ *   - The home balance is masked as ****** until the eye toggle is tapped.
+ * `onPhase` drives the progress list on the account screen.
  */
 export async function syncTelebirr(
   onPhase: (phase: SyncPhase) => void
 ): Promise<{ balance: number | null; nodes: ScrapedNode[] }> {
-  const { phoneNationalDigits, pin } = TELEBIRR_LOGIN;
+  const { pin } = TELEBIRR_LOGIN;
 
   onPhase("opening");
   await openKnownApp(TELEBIRR);
   await AutoAccessibility.sleep(4000);
 
   onPhase("phone");
-  const needsLogin = await AutoAccessibility.clickByViewId("et_input");
-  if (needsLogin) {
-    await AutoAccessibility.sleep(500);
-    await AutoAccessibility.typeText(phoneNationalDigits);
-    await AutoAccessibility.sleep(500);
-    await AutoAccessibility.clickByViewId("btn_next");
+  let nodes = await AutoAccessibility.scrapeScreen();
+  if (looksLikeLogin(nodes)) {
+    // The number is prefilled on this account; just advance to the PIN.
+    await AutoAccessibility.clickByText("Next");
     await AutoAccessibility.sleep(6000);
 
     onPhase("pin");
     for (const digit of pin.split("")) {
-      await AutoAccessibility.clickByViewId(`tv_input_${digit}`);
-      await AutoAccessibility.sleep(350);
+      await tapDigit(digit);
+      await AutoAccessibility.sleep(400);
     }
     // telebirr submits on the sixth digit, then loads the home screen.
     await AutoAccessibility.sleep(6000);
   }
 
   onPhase("reading");
-  const nodes = await AutoAccessibility.scrapeScreen();
+  nodes = await AutoAccessibility.scrapeScreen();
+  // Home hides the balance by default — reveal it, then read again.
+  if (balanceIsMasked(nodes) || parseBalance(nodes) === null) {
+    await tapFraction(BALANCE_EYE.fx, BALANCE_EYE.fy);
+    await AutoAccessibility.sleep(1200);
+    nodes = await AutoAccessibility.scrapeScreen();
+  }
+
   onPhase("done");
   return { balance: parseBalance(nodes), nodes };
 }

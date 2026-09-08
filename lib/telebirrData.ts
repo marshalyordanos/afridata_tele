@@ -9,18 +9,43 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
  * been mapped to view-ids yet, so `transactions` is seeded with realistic
  * placeholders and replaced wholesale once a receipt scraper exists.
  */
+/** One line as the accessibility engine saw it, kept for the receipt page. */
+export interface TelebirrSourceNode {
+  id: string;
+  text: string;
+}
+
 export interface TelebirrTransaction {
   id: string;
   /** Group heading this row belongs under ("Today", "Yesterday", "Fri 5 Sep"). */
   day: string;
+  /** Clock time as telebirr printed it, e.g. "10:24". */
+  time: string;
+  /** "Received", "Merchant", "Transfer", "Package", "Withdrawal", "Self". */
+  kind: string;
   name: string;
-  /** Secondary line: kind and time, e.g. "Merchant · 18:41". */
-  meta: string;
+  /** Masked number or agent id on the other side, when telebirr shows one. */
+  counterparty?: string;
   /** ETB, positive when money came in, negative when it went out. */
   value: number;
   receipt: string;
   charge: string;
   balanceAfter: string;
+  status: string;
+  /** Raw nodes this row was built from; absent on rows that were never scraped. */
+  sourceNodes?: TelebirrSourceNode[];
+}
+
+/** The secondary line under a transaction name in the lists. */
+export function txMeta(tx: TelebirrTransaction): string {
+  return `${tx.kind} · ${tx.time}`;
+}
+
+export function findTransaction(
+  snapshot: TelebirrSnapshot,
+  id: string
+): TelebirrTransaction | undefined {
+  return snapshot.transactions.find((tx) => tx.id === id);
 }
 
 export interface TelebirrSnapshot {
@@ -35,13 +60,47 @@ export interface TelebirrSnapshot {
 }
 
 const SAMPLE_TRANSACTIONS: TelebirrTransaction[] = [
-  { id: "cj8k2m4p1q", day: "Today", name: "Hanna Girma", meta: "Received · 10:24", value: 2500, receipt: "CJ8K2M4P1Q", charge: "ETB 0.00", balanceAfter: "ETB 12,480.65" },
-  { id: "cj8h9l2k7t", day: "Today", name: "Ethio Telecom · 30GB", meta: "Package · 09:02", value: -499, receipt: "CJ8H9L2K7T", charge: "ETB 0.00", balanceAfter: "ETB 9,980.65" },
-  { id: "cj7r4t8w2n", day: "Yesterday", name: "Shoa Supermarket", meta: "Merchant · 18:41", value: -1243.35, receipt: "CJ7R4T8W2N", charge: "ETB 0.00", balanceAfter: "ETB 10,479.65" },
-  { id: "cj7b6v3x9d", day: "Yesterday", name: "Abebe Tadesse", meta: "Transfer · 14:05", value: -3000, receipt: "CJ7B6V3X9D", charge: "ETB 0.00", balanceAfter: "ETB 11,723.00" },
-  { id: "cj7m1c5z4f", day: "Yesterday", name: "Yonas Kebede", meta: "Received · 11:30", value: 6800, receipt: "CJ7M1C5Z4F", charge: "ETB 0.00", balanceAfter: "ETB 14,723.00" },
-  { id: "cj5n7q2h6r", day: "Fri 5 Sep", name: "Airtime top-up", meta: "Self · 20:12", value: -100, receipt: "CJ5N7Q2H6R", charge: "ETB 0.00", balanceAfter: "ETB 7,923.00" },
-  { id: "cj5d3g8j1k", day: "Fri 5 Sep", name: "Cash out · Agent 4471", meta: "Withdrawal · 16:48", value: -2000, receipt: "CJ5D3G8J1K", charge: "ETB 12.50", balanceAfter: "ETB 8,023.00" },
+  {
+    id: "cj8k2m4p1q", day: "Today", time: "10:24", kind: "Received", name: "Hanna Girma",
+    counterparty: "+251 91 ••• 4472", value: 2500, receipt: "CJ8K2M4P1Q",
+    charge: "ETB 0.00", balanceAfter: "ETB 12,480.65", status: "Completed",
+    sourceNodes: [
+      { id: "tv_title", text: "Receive Money" },
+      { id: "tv_amount", text: "2,500.00" },
+      { id: "tv_trans_id", text: "CJ8K2M4P1Q" },
+      { id: "tv_balance", text: "ETB 12,480.65" },
+    ],
+  },
+  {
+    id: "cj8h9l2k7t", day: "Today", time: "09:02", kind: "Package", name: "Ethio Telecom · 30GB",
+    counterparty: "Self", value: -499, receipt: "CJ8H9L2K7T",
+    charge: "ETB 0.00", balanceAfter: "ETB 9,980.65", status: "Completed",
+  },
+  {
+    id: "cj7r4t8w2n", day: "Yesterday", time: "18:41", kind: "Merchant", name: "Shoa Supermarket",
+    counterparty: "Merchant 220145", value: -1243.35, receipt: "CJ7R4T8W2N",
+    charge: "ETB 0.00", balanceAfter: "ETB 10,479.65", status: "Completed",
+  },
+  {
+    id: "cj7b6v3x9d", day: "Yesterday", time: "14:05", kind: "Transfer", name: "Abebe Tadesse",
+    counterparty: "+251 92 ••• 1180", value: -3000, receipt: "CJ7B6V3X9D",
+    charge: "ETB 0.00", balanceAfter: "ETB 11,723.00", status: "Completed",
+  },
+  {
+    id: "cj7m1c5z4f", day: "Yesterday", time: "11:30", kind: "Received", name: "Yonas Kebede",
+    counterparty: "+251 93 ••• 7708", value: 6800, receipt: "CJ7M1C5Z4F",
+    charge: "ETB 0.00", balanceAfter: "ETB 14,723.00", status: "Completed",
+  },
+  {
+    id: "cj5n7q2h6r", day: "Fri 5 Sep", time: "20:12", kind: "Self", name: "Airtime top-up",
+    counterparty: "+251 98 ••• 0094", value: -100, receipt: "CJ5N7Q2H6R",
+    charge: "ETB 0.00", balanceAfter: "ETB 7,923.00", status: "Completed",
+  },
+  {
+    id: "cj5d3g8j1k", day: "Fri 5 Sep", time: "16:48", kind: "Withdrawal", name: "Cash out · Agent 4471",
+    counterparty: "Agent 4471", value: -2000, receipt: "CJ5D3G8J1K",
+    charge: "ETB 12.50", balanceAfter: "ETB 8,023.00", status: "Completed",
+  },
 ];
 
 export const EMPTY_SNAPSHOT: TelebirrSnapshot = {
@@ -120,9 +179,9 @@ export function totals(transactions: TelebirrTransaction[]): { in: number; out: 
 /** Comma-safe CSV of everything currently held, for the Export action. */
 export function toCsv(transactions: TelebirrTransaction[]): string {
   const rows = transactions.map((tx) =>
-    [tx.day, tx.name, tx.meta, tx.value.toFixed(2), tx.receipt, tx.charge, tx.balanceAfter]
+    [tx.day, tx.time, tx.kind, tx.name, tx.value.toFixed(2), tx.receipt, tx.charge, tx.balanceAfter]
       .map((cell) => `"${String(cell).replace(/"/g, '""')}"`)
       .join(",")
   );
-  return ["day,name,detail,amount_etb,receipt,service_charge,balance_after", ...rows].join("\n");
+  return ["day,time,kind,name,amount_etb,receipt,service_charge,balance_after", ...rows].join("\n");
 }

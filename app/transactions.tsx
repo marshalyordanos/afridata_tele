@@ -1,15 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import {
-  View,
-  Text,
-  SectionList,
-  Pressable,
-  TextInput,
-  StyleSheet,
-  LayoutAnimation,
-  Platform,
-  UIManager,
-} from "react-native";
+import { View, Text, SectionList, Pressable, TextInput, StyleSheet } from "react-native";
 import { useRouter } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
@@ -20,6 +10,7 @@ import {
   money,
   signedMoney,
   relativeTime,
+  txMeta,
   TelebirrSnapshot,
   TelebirrTransaction,
   EMPTY_SNAPSHOT,
@@ -34,18 +25,12 @@ const TABS: { id: Filter; label: string }[] = [
   { id: "out", label: "Sent" },
 ];
 
-// Row expansion animates on Android only once this is switched on.
-if (Platform.OS === "android" && UIManager.setLayoutAnimationEnabledExperimental) {
-  UIManager.setLayoutAnimationEnabledExperimental(true);
-}
-
 export default function Transactions() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
 
   const [snapshot, setSnapshot] = useState<TelebirrSnapshot>(EMPTY_SNAPSHOT);
   const [filter, setFilter] = useState<Filter>("all");
-  const [open, setOpen] = useState<string | null>(null);
   const [searching, setSearching] = useState(false);
   const [query, setQuery] = useState("");
 
@@ -62,7 +47,7 @@ export default function Transactions() {
       return (
         tx.name.toLowerCase().includes(needle) ||
         tx.receipt.toLowerCase().includes(needle) ||
-        tx.meta.toLowerCase().includes(needle)
+        tx.kind.toLowerCase().includes(needle)
       );
     });
   }, [snapshot.transactions, filter, query]);
@@ -70,58 +55,31 @@ export default function Transactions() {
   const sections = useMemo(() => groupByDay(visible), [visible]);
   const sums = useMemo(() => totals(visible), [visible]);
 
-  const toggle = (id: string) => {
-    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-    setOpen((current) => (current === id ? null : id));
-  };
-
   const renderRow = (tx: TelebirrTransaction) => {
     const incoming = tx.value > 0;
-    const expanded = open === tx.id;
     return (
-      <View style={[s.card, expanded && { borderColor: C.borderStrong }]}>
-        <Pressable
-          style={({ pressed }) => [s.row, pressed && { opacity: 0.7 }]}
-          onPress={() => toggle(tx.id)}
-        >
-          <View style={[s.icon, { backgroundColor: incoming ? C.greenSoft : C.redSoft }]}>
-            <Feather
-              name={incoming ? "arrow-down-left" : "arrow-up-right"}
-              size={18}
-              color={incoming ? C.green : C.red}
-            />
-          </View>
-          <View style={{ flex: 1, gap: 3 }}>
-            <Text style={s.name} numberOfLines={1}>
-              {tx.name}
-            </Text>
-            <Text style={s.dim}>{tx.meta}</Text>
-          </View>
-          <Text style={[s.amount, { color: incoming ? C.green : C.text }]}>
-            {signedMoney(tx.value)}
-          </Text>
+      <Pressable
+        style={({ pressed }) => [s.card, s.row, pressed && { opacity: 0.7 }]}
+        onPress={() => router.push(`/transaction/${tx.id}`)}
+      >
+        <View style={[s.icon, { backgroundColor: incoming ? C.greenSoft : C.redSoft }]}>
           <Feather
-            name={expanded ? "chevron-up" : "chevron-down"}
-            size={14}
-            color="#aab5c9"
+            name={incoming ? "arrow-down-left" : "arrow-up-right"}
+            size={18}
+            color={incoming ? C.green : C.red}
           />
-        </Pressable>
-
-        {expanded && (
-          <View style={s.detail}>
-            <Detail label="Receipt no." value={tx.receipt} />
-            <Detail label="Service charge" value={tx.charge} />
-            <Detail label="Balance after" value={tx.balanceAfter} />
-            <View style={s.detailFooter}>
-              <View style={s.statusRow}>
-                <Feather name="check" size={13} color={C.green} />
-                <Text style={s.status}>Completed</Text>
-              </View>
-              <Text style={s.link}>Open receipt</Text>
-            </View>
-          </View>
-        )}
-      </View>
+        </View>
+        <View style={{ flex: 1, gap: 3 }}>
+          <Text style={s.name} numberOfLines={1}>
+            {tx.name}
+          </Text>
+          <Text style={s.dim}>{txMeta(tx)}</Text>
+        </View>
+        <Text style={[s.amount, { color: incoming ? C.green : C.text }]}>
+          {signedMoney(tx.value)}
+        </Text>
+        <Feather name="chevron-right" size={14} color="#aab5c9" />
+      </Pressable>
     );
   };
 
@@ -204,15 +162,6 @@ export default function Transactions() {
           </View>
         }
       />
-    </View>
-  );
-}
-
-function Detail({ label, value }: { label: string; value: string }) {
-  return (
-    <View style={s.detailRow}>
-      <Text style={s.dim}>{label}</Text>
-      <Text style={s.detailValue}>{value}</Text>
     </View>
   );
 }
@@ -301,28 +250,6 @@ const s = StyleSheet.create({
   name: { fontSize: 14, fontWeight: "500", color: C.text },
   amount: { fontSize: 14, fontWeight: "600", ...TABULAR },
 
-  detail: {
-    backgroundColor: C.surfaceAlt,
-    borderTopWidth: 1,
-    borderTopColor: C.divider,
-    paddingHorizontal: 14,
-    paddingTop: 12,
-    paddingBottom: 14,
-    gap: 9,
-  },
-  detailRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
-  detailValue: { fontSize: 12, fontWeight: "500", color: C.text, fontFamily: "monospace" },
-  detailFooter: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    borderTopWidth: 1,
-    borderTopColor: "#e7ecf5",
-    paddingTop: 10,
-  },
-  statusRow: { flexDirection: "row", alignItems: "center", gap: 6 },
-  status: { fontSize: 12, fontWeight: "600", color: C.green },
-  link: { fontSize: 12, fontWeight: "600", color: C.accent },
 
   empty: { alignItems: "center", gap: 10, paddingTop: 48 },
 });

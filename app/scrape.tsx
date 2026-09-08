@@ -7,6 +7,7 @@ import {
   ScrollView,
   StyleSheet,
 } from "react-native";
+import { StatusBar } from "expo-status-bar";
 import AutoAccessibility, { ScrapedNode } from "auto-accessibility";
 
 /**
@@ -34,6 +35,7 @@ export default function Scrape() {
 
   return (
     <View style={styles.screen}>
+      <StatusBar style="light" />
       <TextInput
         value={pkg}
         onChangeText={setPkg}
