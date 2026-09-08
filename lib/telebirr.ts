@@ -234,7 +234,7 @@ async function returnToAutoPilot(): Promise<void> {
  * telebirr renders the balance without a thousands separator on some builds,
  * so the separator group is optional.
  */
-const AMOUNT = /(?:ETB|Br|Birr)?\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2}))/i;
+const AMOUNT = /([0-9][0-9,]*\.[0-9]{2})/;
 
 /**
  * Best-effort balance out of a screen dump. Nodes that mention "balance" win,
@@ -248,10 +248,22 @@ const AMOUNT = /(?:ETB|Br|Birr)?\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2}))/i;
  */
 export function parseBalance(nodes: { text: string; description: string }[]): number | null {
   const texts = nodes.map((n) => (n.text || n.description || "").trim()).filter(Boolean);
-  const labelled = texts.findIndex((t) => /balance|ቀሪ/i.test(t));
-  // The amount usually sits on the label's node or in the next few after it.
-  const ordered = labelled >= 0 ? [...texts.slice(labelled, labelled + 4), ...texts] : texts;
-  for (const text of ordered) {
+  // Target the MAIN balance only. telebirr's home also shows "Endekise (ETB)"
+  // and "Reward (ETB)", each separately masked, so the amount is read from the
+  // few nodes right after the main "Balance" label and nowhere else — otherwise
+  // a masked main balance would be mistaken for a revealed Endekise/Reward one.
+  const main = texts.findIndex((t) => /balance|ቀሪ/i.test(t) && !/endekise|reward/i.test(t));
+  if (main >= 0) {
+    for (const text of texts.slice(main, main + 4)) {
+      const match = text.match(AMOUNT);
+      if (match) return Number(match[1].replace(/,/g, ""));
+    }
+    // Label is there but the value beside it is masked (******) or missing:
+    // report it as unread so the caller taps the eye and reads again.
+    return null;
+  }
+  // No labelled balance at all — first amount anywhere, as a last resort.
+  for (const text of texts) {
     const match = text.match(AMOUNT);
     if (match) return Number(match[1].replace(/,/g, ""));
   }
@@ -373,6 +385,90 @@ async function tapDigit(digit: string): Promise<void> {
   await AutoAccessibility.clickByText(digit);
 }
 
+/** Text only telebirr's signed-in home shows. */
+function looksLikeHome(nodes: ScrapedNode[]): boolean {
+  return nodes.some((n) => /send money|available balance|^balance$/i.test((n.text || "").trim()));
+}
+
+/** Enters the six-digit login PIN with the spacing this keypad needs. */
+async function enterLoginPin(pin: string): Promise<void> {
+  for (const digit of pin.split("")) {
+    await tapDigit(digit);
+    await AutoAccessibility.sleep(700);
+  }
+  await AutoAccessibility.sleep(6000); // sixth digit submits; home then loads
+}
+
+/**
+ * Get telebirr to its signed-in HOME, whatever it opened on.
+ *
+ * telebirr does not reliably resume to home — a relaunch can land on the login
+ * screen, a splash, or the last mini-app it had open. So this loops: sign in
+ * when it shows login, back out + relaunch when it shows something that is
+ * neither home nor login (a mini-app's Back leaves telebirr entirely, so a
+ * clean relaunch is the only way to a known screen), and stop once home shows.
+ */
+async function reachHome(
+  pin: string,
+  onPhase: (p: SyncPhase) => void
+): Promise<boolean> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const nodes = await AutoAccessibility.scrapeScreen();
+    if (looksLikeHome(nodes)) return true;
+    if (looksLikeLogin(nodes)) {
+      onPhase("phone");
+      await AutoAccessibility.clickByText("Next");
+      await AutoAccessibility.sleep(6000);
+      onPhase("pin");
+      await enterLoginPin(pin);
+      continue;
+    }
+    // Some other screen (splash or a resumed mini-app): get back to a known
+    // entry by leaving it and relaunching telebirr fresh.
+    await AutoAccessibility.pressBack();
+    await AutoAccessibility.sleep(1500);
+    await openKnownApp(TELEBIRR);
+    await AutoAccessibility.sleep(4000);
+  }
+  return looksLikeHome(await AutoAccessibility.scrapeScreen());
+}
+
+/**
+ * Open the Transaction History mini-app from home and return its rows.
+ *
+ * The "Transaction Details" tile is below the fold, so this swipes up and polls
+ * for the link before tapping it, then polls for the list — which renders about
+ * seven seconds AFTER the mini-app opens, not immediately. The whole thing is
+ * retried once, since a swipe or the H5 load can miss on a cold run.
+ */
+async function readTransactions(): Promise<TelebirrTransaction[]> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    // Bring the tile into view (up to three swipes) and open it.
+    let opened = false;
+    for (let s = 0; s < 3 && !opened; s++) {
+      await swipeUp();
+      await AutoAccessibility.sleep(900);
+      opened = await AutoAccessibility.clickByText("Transaction Detail");
+    }
+    if (opened) {
+      // Rows appear ~7s after the mini-app opens; poll up to ~18s.
+      for (let i = 0; i < 12; i++) {
+        await AutoAccessibility.sleep(1500);
+        const rows = parseTransactions(await AutoAccessibility.scrapeScreen());
+        if (rows.length) {
+          await AutoAccessibility.pressBack(); // leave the mini-app
+          await AutoAccessibility.sleep(1500);
+          return rows;
+        }
+      }
+      // Opened but nothing rendered — back out and try the whole thing again.
+      await AutoAccessibility.pressBack();
+      await AutoAccessibility.sleep(2000);
+    }
+  }
+  return [];
+}
+
 /**
  * Opens telebirr, signs in if it asks, reveals the balance, and scrapes home.
  *
@@ -399,47 +495,27 @@ export async function syncTelebirr(
   await openKnownApp(TELEBIRR);
   await AutoAccessibility.sleep(4000);
 
+  // Sign in if asked, and make sure we are actually on home before reading —
+  // telebirr may resume on a splash or a mini-app instead of home.
   onPhase("phone");
-  let nodes = await AutoAccessibility.scrapeScreen();
-  if (looksLikeLogin(nodes)) {
-    // The number is prefilled on this account; just advance to the PIN.
-    await AutoAccessibility.clickByText("Next");
-    await AutoAccessibility.sleep(6000);
-
-    onPhase("pin");
-    for (const digit of pin.split("")) {
-      await tapDigit(digit);
-      await AutoAccessibility.sleep(400);
-    }
-    // telebirr submits on the sixth digit, then loads the home screen.
-    await AutoAccessibility.sleep(6000);
-  }
+  const home = await reachHome(pin, onPhase);
 
   onPhase("reading");
-  nodes = await AutoAccessibility.scrapeScreen();
-  // Home hides the balance by default — reveal it, then read again.
-  if (balanceIsMasked(nodes) || parseBalance(nodes) === null) {
+  let nodes = await AutoAccessibility.scrapeScreen();
+  // Reveal ONLY when the main balance itself can't be read (masked or absent).
+  // Keying off parseBalance — not "is any ****** on screen" — matters: the
+  // Endekise/Reward figures are separately masked, so tapping the eye while the
+  // main total is already showing would just hide it again.
+  if (parseBalance(nodes) === null) {
     await tapFraction(BALANCE_EYE.fx, BALANCE_EYE.fy);
     await AutoAccessibility.sleep(1200);
     nodes = await AutoAccessibility.scrapeScreen();
   }
   const balance = parseBalance(nodes);
 
-  // Then read the receipts from the "Transaction Details" tile, which opens
-  // telebirr's Transaction History mini-app. The tile sits below the fold on
-  // home, so a swipe up is what brings it into the accessibility tree for
-  // clickByText to find.
-  let transactions: TelebirrTransaction[] = [];
-  await swipeUp();
-  await AutoAccessibility.sleep(700);
-  if (await AutoAccessibility.clickByText("Transaction Details")) {
-    // The mini-app is an H5 surface and needs a beat to render its list.
-    await AutoAccessibility.sleep(6000);
-    transactions = parseTransactions(await AutoAccessibility.scrapeScreen());
-    // Leave the mini-app so the next open starts from home again.
-    await AutoAccessibility.pressBack();
-    await AutoAccessibility.sleep(1500);
-  }
+  // Then the receipts, from the "Transaction Details" tile (opens telebirr's
+  // Transaction History mini-app). Only attempted once we know we are on home.
+  const transactions = home ? await readTransactions() : [];
 
   // The read is done in telebirr; put AutoPilot back in front of the user.
   onPhase("returning");
@@ -468,7 +544,6 @@ export const SEND_AMOUNT_BIRR = "1";
 /** Label candidates, most likely first — builds and locales differ. */
 const SEND_MENU_LABELS = ["Send Money", "Send money", "SendMoney", "Send", "Transfer"];
 const NEXT_LABELS = ["Next", "NEXT", "Continue", "CONTINUE", "Proceed"];
-const CONFIRM_LABELS = ["Confirm", "CONFIRM", "Send", "SEND", "Pay", "PAY", "OK"];
 
 export type SendPhase =
   | "opening"
@@ -496,17 +571,56 @@ async function clickAnyText(candidates: string[]): Promise<string | null> {
   return null;
 }
 
-/** Taps a six-digit PIN on telebirr's custom keypad (tv_input_0..9). */
+/**
+ * Taps a six-digit PIN on whichever keypad is showing.
+ *
+ * The login keypad (PinOfLoginActivity) and the payment keypad
+ * (CommonCheckStandActivity) both come through this build WITHOUT view-ids —
+ * the digits are plain "0".."9" TextViews — so tapDigit tries tv_input_* first
+ * and falls back to tapping the digit's label. 700ms between taps: faster and
+ * the payment keypad silently drops presses.
+ */
 async function tapPin(pin: string): Promise<void> {
   for (const digit of pin.split("")) {
-    await AutoAccessibility.clickByViewId(`tv_input_${digit}`);
-    await AutoAccessibility.sleep(350);
+    await tapDigit(digit);
+    await AutoAccessibility.sleep(700);
   }
 }
 
+/** Clicks the first candidate whose text matches a WHOLE node (never a substring). */
+async function clickExactAny(candidates: string[]): Promise<string | null> {
+  const nodes = await AutoAccessibility.scrapeScreen();
+  for (const label of candidates) {
+    const needle = label.trim().toLowerCase();
+    const node = nodes.find((n) =>
+      [n.text, n.description].some((v) => (v || "").trim().toLowerCase() === needle)
+    );
+    if (!node) continue;
+    if (node.viewId && (await AutoAccessibility.clickByViewId(node.viewId))) return label;
+    if (await AutoAccessibility.tap(node.x, node.y)) return label;
+  }
+  return null;
+}
+
 /**
- * One tap: open telebirr, sign in if it asks, and send `amountBirr` to
+ * Open telebirr, sign in if it asks, and send `amountBirr` to
  * `recipientNationalDigits` (the nine digits after +251).
+ *
+ * Rewritten against telebirr 1.3.2 driven end-to-end on-device, where the old
+ * view-id assumptions were all wrong and the transfer never left the amount
+ * screen:
+ *   - LoginFirstActivity / PinOfLoginActivity have NO ids: login is by the
+ *     "Next" label and tapPin falls back to digit labels.
+ *   - Send Money opens a "To Individual" / "To Group" chooser that the old flow
+ *     skipped entirely.
+ *   - The recipient and amount fields have no `et_input` id; the recipient is
+ *     set with typeText (it targets the only editable node) and the amount is
+ *     committed with the keypad's green OK (an IME key, reachable only by a
+ *     positional tap — see KEYPAD_OK).
+ *   - The confirm sheet's button is an exact "Send", matched whole so it can't
+ *     land on the "Send Money to …" heading.
+ *   - Sending to your OWN number is refused by telebirr, so it is refused here
+ *     up front with a clear message rather than stalling on the recipient screen.
  */
 export async function signInAndSend(
   recipientNationalDigits: string,
@@ -520,21 +634,24 @@ export async function signInAndSend(
     return { ok: false, log, failedAt: phase };
   };
 
+  // telebirr blocks self-transfers, so a send to the signed-in number can never
+  // succeed — the recipient screen just refuses to advance. Catch it here.
+  if (recipientNationalDigits === phoneNationalDigits) {
+    return stop("recipient", "telebirr will not send to your own number — use a different one");
+  }
+
   try {
     onPhase("opening");
     const pkg = await openKnownApp(TELEBIRR);
     log.push(`opened ${pkg}`);
     await AutoAccessibility.sleep(4000);
 
-    // et_input only exists on the phone-number screen: its absence means the
-    // session is still alive and login can be skipped.
+    // Login is detected by the on-screen text, not a probe for et_input, which
+    // does not exist on this build. The number is prefilled, so only Next + PIN.
     onPhase("login");
-    if (await AutoAccessibility.clickByViewId("et_input")) {
-      await AutoAccessibility.sleep(500);
-      await AutoAccessibility.typeText(phoneNationalDigits);
-      await AutoAccessibility.sleep(500);
-      if (!(await AutoAccessibility.clickByViewId("btn_next"))) {
-        return stop("login", "sign-in: btn_next not found");
+    if (looksLikeLogin(await AutoAccessibility.scrapeScreen())) {
+      if (!(await AutoAccessibility.clickByText("Next"))) {
+        return stop("login", "sign-in: Next not found on the login screen");
       }
       await AutoAccessibility.sleep(6000);
       await tapPin(pin);
@@ -550,40 +667,41 @@ export async function signInAndSend(
       return stop("menu", `no Send Money entry found (tried ${SEND_MENU_LABELS.join(", ")})`);
     }
     log.push(`tapped "${menu}"`);
+    await AutoAccessibility.sleep(2500);
+
+    // Send Money opens a chooser; pick the person transfer ("To Individual").
+    if (!(await AutoAccessibility.clickByText("Individual"))) {
+      return stop("menu", "no 'To Individual' option after Send Money");
+    }
+    log.push("chose To Individual");
     await AutoAccessibility.sleep(3000);
 
     onPhase("recipient");
-    // The recipient screen reuses et_input on the builds seen so far; if that
-    // id is gone the field cannot be targeted safely, so stop.
-    if (!(await AutoAccessibility.clickByViewId("et_input"))) {
-      return stop("recipient", "recipient field (et_input) not found on the send screen");
-    }
-    await AutoAccessibility.sleep(500);
+    // The number field has no id; typeText targets the only editable node on
+    // the screen and sets the text without raising a keyboard.
     await AutoAccessibility.typeText(recipientNationalDigits);
     log.push(`typed recipient ${recipientNationalDigits}`);
-    await AutoAccessibility.sleep(500);
-    if (!(await AutoAccessibility.clickByViewId("btn_next")) && !(await clickAnyText(NEXT_LABELS))) {
+    await AutoAccessibility.sleep(800);
+    if (!(await clickAnyText(NEXT_LABELS))) {
       return stop("recipient", "no Next button after the recipient");
     }
-    await AutoAccessibility.sleep(3000);
+    await AutoAccessibility.sleep(3500);
 
     onPhase("amount");
-    if (!(await AutoAccessibility.clickByViewId("et_input"))) {
-      return stop("amount", "amount field (et_input) not found");
-    }
-    await AutoAccessibility.sleep(500);
+    // Focus the amount box to raise the numeric keypad, fill it, then commit
+    // with the keypad's green OK — there is no on-screen Next here.
+    await tapFraction(AMOUNT_FIELD.fx, AMOUNT_FIELD.fy);
+    await AutoAccessibility.sleep(600);
     await AutoAccessibility.typeText(amountBirr);
     log.push(`typed amount ${amountBirr}`);
-    await AutoAccessibility.sleep(500);
-    if (!(await AutoAccessibility.clickByViewId("btn_next")) && !(await clickAnyText(NEXT_LABELS))) {
-      return stop("amount", "no Next button after the amount");
-    }
+    await AutoAccessibility.sleep(600);
+    await tapFraction(KEYPAD_OK.fx, KEYPAD_OK.fy);
     await AutoAccessibility.sleep(3000);
 
     onPhase("confirm");
-    const confirm = await clickAnyText(CONFIRM_LABELS);
+    const confirm = await clickExactAny(["Send", "Confirm", "Pay", "OK"]);
     if (!confirm) {
-      return stop("confirm", `no confirm button (tried ${CONFIRM_LABELS.join(", ")})`);
+      return stop("confirm", "no Send button on the confirmation sheet");
     }
     log.push(`tapped "${confirm}"`);
     await AutoAccessibility.sleep(3000);
@@ -592,13 +710,23 @@ export async function signInAndSend(
     onPhase("pin");
     await tapPin(pin);
     log.push("entered PIN");
-    await AutoAccessibility.sleep(5000);
+    await AutoAccessibility.sleep(6000);
+
+    // Confirm it actually went through before claiming success.
+    const after = await AutoAccessibility.scrapeScreen();
+    const ok = after.some((n) => /success/i.test(n.text || n.description || ""));
+    const receipt = after
+      .map((n) => (n.text || "").trim())
+      .find((t) => /^[A-Z0-9]{8,}$/.test(t));
 
     onPhase("returning");
     await returnToAutoPilot();
 
+    if (!ok) {
+      return stop("pin", "PIN entered but no success screen — wrong PIN, or telebirr is on Wi-Fi");
+    }
     onPhase("done");
-    log.push(`sent ETB ${amountBirr} to +251${recipientNationalDigits}`);
+    log.push(`sent ETB ${amountBirr} to +251${recipientNationalDigits}${receipt ? ` · ${receipt}` : ""}`);
     return { ok: true, log };
   } catch (e: any) {
     return stop("opening", e?.message ?? String(e));

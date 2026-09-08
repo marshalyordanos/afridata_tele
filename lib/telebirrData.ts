@@ -4,10 +4,10 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
  * The shape of a telebirr account as AutoPilot holds it.
  *
  * A snapshot is whatever the last successful read produced. The balance comes
- * from scraping telebirr's home screen (see `parseBalance` in ./telebirr);
- * the transaction list is still SAMPLE data — telebirr's receipt list has not
- * been mapped to view-ids yet, so `transactions` is seeded with realistic
- * placeholders and replaced wholesale once a receipt scraper exists.
+ * from telebirr's home screen (revealed past its ****** mask) and the
+ * transactions from its "Transaction History" mini-app — both scraped in
+ * ./telebirr (see `parseBalance` and `parseTransactions`). Before the first
+ * read the snapshot is blank (balance null, no rows) so nothing invented shows.
  */
 /** One line as the accessibility engine saw it, kept for the receipt page. */
 export interface TelebirrSourceNode {
@@ -61,60 +61,24 @@ export interface TelebirrSnapshot {
   transactions: TelebirrTransaction[];
 }
 
-const SAMPLE_TRANSACTIONS: TelebirrTransaction[] = [
-  {
-    id: "cj8k2m4p1q", day: "Today", time: "10:24", kind: "Received", name: "Hanna Girma",
-    counterparty: "+251 91 ••• 4472", value: 2500, receipt: "CJ8K2M4P1Q",
-    charge: "ETB 0.00", balanceAfter: "ETB 12,480.65", status: "Completed",
-    sourceNodes: [
-      { id: "tv_title", text: "Receive Money" },
-      { id: "tv_amount", text: "2,500.00" },
-      { id: "tv_trans_id", text: "CJ8K2M4P1Q" },
-      { id: "tv_balance", text: "ETB 12,480.65" },
-    ],
-  },
-  {
-    id: "cj8h9l2k7t", day: "Today", time: "09:02", kind: "Package", name: "Ethio Telecom · 30GB",
-    counterparty: "Self", value: -499, receipt: "CJ8H9L2K7T",
-    charge: "ETB 0.00", balanceAfter: "ETB 9,980.65", status: "Completed",
-  },
-  {
-    id: "cj7r4t8w2n", day: "Yesterday", time: "18:41", kind: "Merchant", name: "Shoa Supermarket",
-    counterparty: "Merchant 220145", value: -1243.35, receipt: "CJ7R4T8W2N",
-    charge: "ETB 0.00", balanceAfter: "ETB 10,479.65", status: "Completed",
-  },
-  {
-    id: "cj7b6v3x9d", day: "Yesterday", time: "14:05", kind: "Transfer", name: "Abebe Tadesse",
-    counterparty: "+251 92 ••• 1180", value: -3000, receipt: "CJ7B6V3X9D",
-    charge: "ETB 0.00", balanceAfter: "ETB 11,723.00", status: "Completed",
-  },
-  {
-    id: "cj7m1c5z4f", day: "Yesterday", time: "11:30", kind: "Received", name: "Yonas Kebede",
-    counterparty: "+251 93 ••• 7708", value: 6800, receipt: "CJ7M1C5Z4F",
-    charge: "ETB 0.00", balanceAfter: "ETB 14,723.00", status: "Completed",
-  },
-  {
-    id: "cj5n7q2h6r", day: "Fri 5 Sep", time: "20:12", kind: "Self", name: "Airtime top-up",
-    counterparty: "+251 98 ••• 0094", value: -100, receipt: "CJ5N7Q2H6R",
-    charge: "ETB 0.00", balanceAfter: "ETB 7,923.00", status: "Completed",
-  },
-  {
-    id: "cj5d3g8j1k", day: "Fri 5 Sep", time: "16:48", kind: "Withdrawal", name: "Cash out · Agent 4471",
-    counterparty: "Agent 4471", value: -2000, receipt: "CJ5D3G8J1K",
-    charge: "ETB 12.50", balanceAfter: "ETB 8,023.00", status: "Completed",
-  },
-];
-
 export const EMPTY_SNAPSHOT: TelebirrSnapshot = {
-  balance: 12480.65,
+  // Nothing real is known until the first read from telebirr — start blank
+  // rather than showing an invented balance or invented receipts.
+  balance: null,
   phoneNationalDigits: "986680094",
   accountKind: "Personal",
-  sendRecipientDigits: "",
+  // Default recipient (+251 986680093). Must not be the signed-in number
+  // above — telebirr refuses a self-transfer.
+  sendRecipientDigits: "986680093",
   readAt: null,
-  transactions: SAMPLE_TRANSACTIONS,
+  // Filled in by the first telebirr read; no invented rows before that.
+  transactions: [],
 };
 
-const KEY = "autopilot.telebirr.snapshot";
+// Bumped to v2 so any snapshot saved while the app still shipped demo balance
+// and demo receipts is ignored — the app starts blank and shows only what it
+// reads from telebirr.
+const KEY = "autopilot.telebirr.snapshot.v2";
 
 export async function loadSnapshot(): Promise<TelebirrSnapshot> {
   try {

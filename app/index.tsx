@@ -236,7 +236,11 @@ export default function TelebirrAccount() {
             <View style={s.amountRow}>
               <Text style={s.currency}>ETB</Text>
               <Text style={s.balance}>
-                {masked ? "•• ••• ••" : money(snapshot.balance ?? 0)}
+                {masked
+                  ? "•• ••• ••"
+                  : snapshot.balance === null
+                  ? "—"
+                  : money(snapshot.balance)}
               </Text>
             </View>
           </View>
