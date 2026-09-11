@@ -1,0 +1,82 @@
+// Prisma schema
+// Docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  // Swap to "postgresql" (and the matching adapter) when you move off
+  // local development. The connection URL lives in prisma.config.ts.
+  provider = "sqlite"
+}
+
+model User {
+  id           String        @id @default(cuid())
+  phone        String        @unique
+  name         String
+  balance      Float         @default(0)
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  sent         Transaction[] @relation("SentTransactions")
+  received     Transaction[] @relation("ReceivedTransactions")
+  deposits     Deposit[]
+  withdrawals  Withdrawal[]
+}
+
+model Transaction {
+  id         String            @id @default(cuid())
+  amount     Float
+  status     TransactionStatus @default(PENDING)
+  reference  String            @unique
+  note       String?
+  createdAt  DateTime          @default(now())
+
+  senderId   String
+  sender     User              @relation("SentTransactions", fields: [senderId], references: [id])
+
+  receiverId String
+  receiver   User              @relation("ReceivedTransactions", fields: [receiverId], references: [id])
+
+  @@index([senderId])
+  @@index([receiverId])
+}
+
+enum TransactionStatus {
+  PENDING
+  COMPLETED
+  FAILED
+}
+
+model Deposit {
+  id         String        @id @default(cuid())
+  reference  String        @unique
+  amount     Float
+  status     DepositStatus @default(UNCLAIMED)
+  createdAt  DateTime      @default(now())
+  claimedAt  DateTime?
+
+  userId     String?
+  user       User?         @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+}
+
+model Withdrawal {
+  id        String   @id @default(cuid())
+  reference String   @unique
+  amount    Float
+  createdAt DateTime @default(now())
+
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+}
+
+enum DepositStatus {
+  UNCLAIMED
+  CLAIMED
+}

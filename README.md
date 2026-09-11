@@ -1,57 +1,60 @@
-# AutoPilot — Android app automation & scraping (Expo + Kotlin)
+# Telebirr Hack — Monorepo
 
-An app that can **open other apps, click tabs/buttons in them, and scrape their
-on-screen content** — then use that data elsewhere. Built with Expo (React Native
-UI) + a native **Kotlin Accessibility Service** (the real engine).
+One repository holding the API server, the web app, and the Expo mobile app.
 
-## Why it needs a native build (not Expo Go)
-Android only lets one app read/control another through an **Accessibility Service**,
-which is native Kotlin. So this uses an Expo **development build**, not Expo Go.
+## Structure
 
-## What it can do
-- `openApp(pkg)` — launch any installed app
-- `scrapeScreen()` — read EVERY text node on the current screen (the scraping)
-- `clickByText` / `clickByViewId` / `tap(x,y)` — press things in other apps
-- `swipe`, `typeText`, `pressBack`, `pressHome`
-- Macro engine: chain steps into saved automations (see `lib/macros.ts`)
+```
+.
+├── apps/
+│   ├── server/   telebirr-server — Express 5 + Prisma + SQLite (port 4000)
+│   ├── web/      telebirr-web    — React 19 + Vite (port 5173)
+│   └── mobile/   autopilot       — Expo / React Native (Android)
+├── package.json          workspace root
+└── package-lock.json     shared lockfile for server + web
+```
 
-## First-time setup
+`server` and `web` are npm workspaces sharing one hoisted `node_modules`. `mobile` is deliberately **not** a workspace: Expo pins React 18 while the web app is on React 19, and Metro needs its dependencies resolved locally. It keeps its own `node_modules` and lockfile.
+
+## Setup
+
 ```bash
-cd AutoPilot
-npm install
-npx expo install expo-router expo-linking expo-constants expo-status-bar \
-  react-native-safe-area-context react-native-screens \
-  @react-native-async-storage/async-storage
-npx expo prebuild --platform android   # generates android/, runs the config plugin
-npx expo run:android                   # build + install on a connected device/emulator
-```
-> Needs Android Studio / SDK + a device (USB debugging) or emulator.
+npm install                        # installs server + web
+cp .env.example apps/server/.env   # then trim to the server vars
+cp .env.example apps/web/.env      # then trim to the web vars
+npm run prisma:generate
+npm run prisma:migrate
+npm run db:seed
 
-## Using it
-1. Launch AutoPilot. It shows **⚠️ Accessibility OFF**.
-2. Tap **Open Accessibility Settings** → enable **AutoPilot**.
-3. Back in the app it flips to **✅ enabled**.
-4. Run a demo macro, or open **Live Scrape** to dump any app's screen text.
-
-## How the pieces fit
-```
-app/                     Expo Router UI (dashboard, live scrape)
-lib/macros.ts            macro types + run engine + storage
-modules/auto-accessibility/
-  plugin.js              injects the <service> into AndroidManifest
-  src/AutoAccessibility.ts   typed JS wrapper
-  android/.../AutoAccessibilityService.kt   the engine (read screen, tap, gesture)
-  android/.../AutoAccessibilityModule.kt    JS<->Kotlin bridge
+npm run mobile:install             # installs the Expo app separately
 ```
 
-## Find an app's package name
-On a connected device:
+## Everyday commands
+
+Run from the repo root.
+
+| Command | What it does |
+| --- | --- |
+| `npm run dev` | Starts server and web together |
+| `npm run dev:server` | Server only |
+| `npm run dev:web` | Web only |
+| `npm run build` | Builds both, server first |
+| `npm start` | Runs the built server |
+| `npm run preview` | Serves the built web app |
+| `npm run lint` | Lints the web app |
+| `npm run typecheck` | Type-checks server and web |
+| `npm run clean` | Removes node_modules and build output |
+| `npm run mobile` | Starts the Expo dev client |
+| `npm run mobile:android` | Builds and runs on Android |
+
+Prisma tasks are proxied from the root: `prisma:generate`, `prisma:migrate`, `prisma:studio`, `db:seed`.
+
+## Working inside one app
+
 ```bash
-adb shell pm list packages | grep instagram
+npm run <script> --workspace=telebirr-server
+npm install <pkg> --workspace=telebirr-web
+npm install <pkg> --prefix apps/mobile      # mobile is not a workspace
 ```
 
-## ⚠️ Notes
-- Accessibility automation is powerful; use it only on your own device/accounts and
-  respect each app's terms. Banking/finance apps often block accessibility scraping.
-- Coordinates from `tap`/`swipe` are device-resolution specific; prefer `clickByText`
-  / `clickByViewId` for portability.
+Do not add per-app lockfiles for server or web.
