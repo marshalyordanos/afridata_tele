@@ -1,21 +1,49 @@
 :root {
-  --bg: #f4f6fb;
+  /* Surfaces: a warm off-white page with pure-white cards floating on it. */
+  --bg: #f2f0ec;
   --surface: #ffffff;
-  --border: #e4e8f0;
-  --text: #131a2a;
-  --muted: #6b7690;
-  --brand: #1f6feb;
-  --brand-dark: #1657bd;
-  --success-bg: #e8f8ef;
-  --success-text: #10693c;
-  --error-bg: #fdecec;
+  --surface-sunken: #f7f6f3;
+  --border: #e7e4dd;
+  --border-strong: #d6d2c8;
+
+  --text: #14171a;
+  --muted: #6b7280;
+  --faint: #9aa0a8;
+
+  /* The action colour. Green reads as "go" and "money is safe" here. */
+  --brand: #1f9d5a;
+  --brand-dark: #17864b;
+  --brand-soft: #eaf6ef;
+
+  --accent: #0f766e;
+  --accent-soft: #e6f4f1;
+
+  --ink: #12181d;
+
+  --success-bg: #eaf6ef;
+  --success-text: #12683d;
+  --success-border: #bfe3cd;
+  --error-bg: #fdeceb;
   --error-text: #b3261e;
-  --radius: 14px;
+  --error-border: #f3c9c6;
+  --warn-bg: #fff6e5;
+  --warn-text: #8a5a00;
+
+  --radius-sm: 10px;
+  --radius: 16px;
+  --radius-lg: 24px;
+  --radius-pill: 999px;
+
+  --shadow-sm: 0 1px 2px rgba(20, 23, 26, 0.05);
+  --shadow: 0 1px 3px rgba(20, 23, 26, 0.06), 0 12px 32px rgba(20, 23, 26, 0.07);
+
+  --mono: "SF Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 
   color-scheme: light;
   font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
     Helvetica, Arial, sans-serif;
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 * {
@@ -27,12 +55,20 @@ body {
   min-height: 100vh;
   background: var(--bg);
   color: var(--text);
-  display: flex;
-  justify-content: center;
-  padding: 40px 20px;
+  font-size: 14px;
+  line-height: 1.5;
 }
 
 #root {
-  width: 100%;
-  max-width: 460px;
+  min-height: 100vh;
+}
+
+button {
+  font-family: inherit;
+}
+
+/* Anything focused by keyboard gets the same visible ring, everywhere. */
+:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
 }
