@@ -7,9 +7,8 @@ generator client {
 }
 
 datasource db {
-  // Swap to "postgresql" (and the matching adapter) when you move off
-  // local development. The connection URL lives in prisma.config.ts.
-  provider = "sqlite"
+  // The connection URL lives in prisma.config.ts (DATABASE_URL).
+  provider = "postgresql"
 }
 
 model User {
@@ -79,4 +78,90 @@ model Withdrawal {
 enum DepositStatus {
   UNCLAIMED
   CLAIMED
+}
+
+/// Cash-in/cash-out agents managed from the admin app.
+model Agent {
+  id             String      @id @default(cuid())
+  /// Always stored normalised as +251XXXXXXXXX.
+  phone          String      @unique
+  fullName       String
+  /// Six-digit Telebirr PIN the agent uses on the handset.
+  pin            String?
+  businessName   String?
+  region         String?
+  city           String?
+  status         AgentStatus @default(PENDING)
+  balance        Float       @default(0)
+  commissionRate Float       @default(0)
+  note           String?
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  depositRequests DepositRequest[]
+
+  @@index([status])
+  @@index([createdAt])
+}
+
+enum AgentStatus {
+  PENDING
+  ACTIVE
+  SUSPENDED
+}
+
+/// Staff who can sign in to the admin console. Only a SUPER_ADMIN may create
+/// or remove other admins.
+model AdminUser {
+  id           String    @id @default(cuid())
+  /// The login identifier. Not an Ethiopian mobile number necessarily — the
+  /// bootstrap super admin signs in as 0000000000.
+  phone        String    @unique
+  name         String
+  passwordHash String
+  role         AdminRole @default(ADMIN)
+  lastLoginAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@index([role])
+}
+
+enum AdminRole {
+  SUPER_ADMIN
+  ADMIN
+}
+
+/// A customer's deposit check, from the moment it is asked to the moment the
+/// agent's handset answers it.
+///
+/// The record is the server's, not the phone's: it survives a handset reboot,
+/// it is what stops the same check being answered twice, and it is the history
+/// both the agent's app and the office read back.
+model DepositRequest {
+  id         String               @id @default(cuid())
+  /// Made up by the customer's browser; how the answer finds its way back.
+  requestId  String               @unique
+  /// Exactly what the customer typed, before any matching.
+  reference  String
+  status     DepositRequestStatus @default(PENDING)
+  /// What telebirr said it was worth. Only ever set alongside CONFIRMED.
+  amount     Float?
+  /// Why a lookup could not run, e.g. accessibility switched off.
+  reason     String?
+  createdAt  DateTime             @default(now())
+  resolvedAt DateTime?
+
+  agentId    String
+  agent      Agent                @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@index([agentId, createdAt])
+  @@index([status])
+}
+
+enum DepositRequestStatus {
+  PENDING
+  CONFIRMED
+  NOT_FOUND
+  FAILED
 }

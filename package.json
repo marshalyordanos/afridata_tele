@@ -5,24 +5,27 @@
   "description": "Telebirr hack monorepo: Express + Prisma API, React + Vite web app, and Expo mobile app",
   "workspaces": [
     "apps/server",
-    "apps/web"
+    "apps/web",
+    "apps/admin"
   ],
   "scripts": {
-    "dev": "npm-run-all --parallel dev:server dev:web",
+    "dev": "npm-run-all --parallel dev:server dev:web dev:admin",
     "dev:server": "npm run dev --workspace=telebirr-server",
     "dev:web": "npm run dev --workspace=telebirr-web",
-    "build": "npm run build:server && npm run build:web",
+    "dev:admin": "npm run dev --workspace=telebirr-admin",
+    "build": "npm run build:server && npm run build:web && npm run build:admin",
     "build:server": "npm run build --workspace=telebirr-server",
     "build:web": "npm run build --workspace=telebirr-web",
+    "build:admin": "npm run build --workspace=telebirr-admin",
     "start": "npm run start --workspace=telebirr-server",
     "preview": "npm run preview --workspace=telebirr-web",
     "lint": "npm run lint --workspace=telebirr-web",
-    "typecheck": "npm run typecheck --workspace=telebirr-server && npm run typecheck --workspace=telebirr-web",
+    "typecheck": "npm run typecheck --workspace=telebirr-server && npm run typecheck --workspace=telebirr-web && npm run typecheck --workspace=telebirr-admin",
     "prisma:generate": "npm run prisma:generate --workspace=telebirr-server",
     "prisma:migrate": "npm run prisma:migrate --workspace=telebirr-server",
     "prisma:studio": "npm run prisma:studio --workspace=telebirr-server",
     "db:seed": "npm run db:seed --workspace=telebirr-server",
-    "clean": "rm -rf node_modules apps/server/node_modules apps/web/node_modules apps/server/dist apps/web/dist",
+    "clean": "rm -rf node_modules apps/server/node_modules apps/web/node_modules apps/admin/node_modules apps/server/dist apps/web/dist apps/admin/dist",
     "mobile": "npm start --prefix apps/mobile",
     "mobile:android": "npm run android --prefix apps/mobile",
     "mobile:install": "npm install --prefix apps/mobile"
@@ -32,5 +35,8 @@
   },
   "engines": {
     "node": ">=20"
+  },
+  "dependencies": {
+    "js-tokens": "^10.0.0"
   }
 }

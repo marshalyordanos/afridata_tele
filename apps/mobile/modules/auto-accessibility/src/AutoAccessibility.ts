@@ -20,8 +20,17 @@ export interface InstalledApp {
  * High-level, typed wrapper around the native accessibility engine.
  */
 const AutoAccessibility = {
+  /** Whether the user has switched the service on in Android's settings. */
   isServiceEnabled(): boolean {
     return Native.isServiceEnabled();
+  },
+  /**
+   * Whether the service is bound and callable right now. This is the one to
+   * check before driving a screen: the settings toggle can be on while Android
+   * has not bound the service yet, and every call below fails until it has.
+   */
+  isServiceRunning(): boolean {
+    return Native.isServiceRunning();
   },
   openAccessibilitySettings(): void {
     Native.openAccessibilitySettings();

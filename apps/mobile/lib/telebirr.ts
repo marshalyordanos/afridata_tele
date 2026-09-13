@@ -4,23 +4,27 @@ import AutoAccessibility, { ScrapedNode } from "auto-accessibility";
 import type { Macro, Step } from "./macros";
 import type { TelebirrTransaction } from "./telebirrData";
 import { TELEBIRR, openKnownApp } from "./apps";
+import { requireAccessibility } from "./accessibility";
+import { requireAgent } from "./agent";
 
 /**
  * telebirr auto-login.
  *
- * Credentials live here so the one-tap "Sign in to telebirr" button can fill
- * them in. This is the user's own device and their own account; the values are
- * only ever passed to telebirr's own login fields and never leave the phone.
+ * The credentials are the enrolled agent's, read from the device at the moment
+ * a run starts (see lib/agent.ts) rather than baked in here — each handset
+ * drives only the account its agent enrolled with. They are passed to
+ * telebirr's own login fields and nowhere else.
  *
  * The number is entered WITHOUT the +251 country code, because telebirr shows
  * +251 as a fixed prefix (tv_area_code) and its input field (et_input) holds
  * only the 9 national digits.
  */
-export const TELEBIRR_LOGIN = {
-  // +251 986680094  ->  the field only wants the 9 digits after +251.
-  phoneNationalDigits: "986680094",
-  pin: "123789",
-};
+export interface TelebirrCredentials {
+  /** The field only wants the 9 digits after +251. */
+  phoneNationalDigits: string;
+  /** The six-digit Telebirr PIN. */
+  pin: string;
+}
 
 /**
  * Steps verified live against telebirr 1.3.2 (cn.tydic.ethiopay):
@@ -37,8 +41,7 @@ export const TELEBIRR_LOGIN = {
  *
  * NOTE: telebirr refuses to log in over Wi-Fi — the phone must be on mobile data.
  */
-function loginSteps(): Step[] {
-  const { phoneNationalDigits, pin } = TELEBIRR_LOGIN;
+function loginSteps({ phoneNationalDigits, pin }: TelebirrCredentials): Step[] {
 
   // Turn "123789" into a tap on tv_input_1, tv_input_2, ... with a beat between
   // each so the keypad registers every press.
@@ -68,11 +71,11 @@ function loginSteps(): Step[] {
   ];
 }
 
-export function buildTelebirrLoginMacro(): Macro {
+export function buildTelebirrLoginMacro(credentials: TelebirrCredentials): Macro {
   return {
     id: "telebirr-login",
     name: "Sign in to telebirr",
-    steps: loginSteps(),
+    steps: loginSteps(credentials),
   };
 }
 
@@ -110,8 +113,8 @@ const AMOUNT_FIELD = { fx: 0.5, fy: 0.307 };
 const KEYPAD_OK = { fx: 0.872, fy: 0.846 };
 
 /**
- * The authorisation PIN, digit by digit — deliberately TELEBIRR_LOGIN.pin, the
- * same 123789 used to sign in, so the two can never drift apart.
+ * The authorisation PIN, digit by digit — deliberately the same PIN used to sign
+ * in, threaded through from the enrolled agent so the two cannot drift apart.
  *
  * Verified against CommonCheckStandActivity: its keypad is plain TextViews "0"
  * to "9" with no resource ids and clickable=false, so clickAny falls through to
@@ -121,8 +124,8 @@ const KEYPAD_OK = { fx: 0.872, fy: 0.846 };
  * 800ms between digits, not the login screen's 350: at 400ms this keypad
  * silently dropped every tap, and at 800ms all six registered.
  */
-function paymentPinTaps(): Step[] {
-  const digits = TELEBIRR_LOGIN.pin.split("");
+function paymentPinTaps(pin: string): Step[] {
+  const digits = pin.split("");
   return digits.flatMap((digit, i) => {
     const steps: Step[] = [
       { type: "clickAny", viewIds: [`tv_input_${digit}`], texts: [digit] },
@@ -157,12 +160,15 @@ function paymentPinTaps(): Step[] {
  * The macro ends on the Send tap. telebirr then asks for the PIN again to
  * authorise the transfer, and that confirmation is left to you.
  */
-export function buildTelebirrSendMoneyMacro(amount: string): Macro {
+export function buildTelebirrSendMoneyMacro(
+  amount: string,
+  credentials: TelebirrCredentials
+): Macro {
   return {
     id: "telebirr-send-money",
     name: `Send ${amount} to ${TELEBIRR_RECIPIENT.full}`,
     steps: [
-      ...loginSteps(),
+      ...loginSteps(credentials),
       // The sixth PIN tap submits by itself. Home can take anywhere from one to
       // fifteen seconds depending on the network, so wait for the tile rather
       // than guessing — "Send Money" is distinctive enough to match loosely.
@@ -202,7 +208,7 @@ export function buildTelebirrSendMoneyMacro(amount: string): Macro {
       // matched exactly, so "1" cannot land on a "1.00ETB" amount.
       { type: "waitFor", text: "1", timeoutMs: 15000 },
       { type: "scrape", label: "payment_pin_screen" },
-      ...paymentPinTaps(),
+      ...paymentPinTaps(credentials.pin),
       { type: "wait", ms: 5000 },
       { type: "scrape", label: "after_send" },
     ],
@@ -489,7 +495,12 @@ export async function syncTelebirr(
   transactions: TelebirrTransaction[];
   nodes: ScrapedNode[];
 }> {
-  const { pin } = TELEBIRR_LOGIN;
+  // The signed-in agent's own credentials; throws when nobody has enrolled.
+  const { pin } = await requireAgent();
+
+  // Nothing here can work without the service, and openApp below would happily
+  // launch telebirr regardless, so the read is refused up front.
+  requireAccessibility();
 
   onPhase("opening");
   await openKnownApp(TELEBIRR);
@@ -627,12 +638,21 @@ export async function signInAndSend(
   amountBirr: string,
   onPhase: (phase: SendPhase) => void
 ): Promise<SendResult> {
-  const { phoneNationalDigits, pin } = TELEBIRR_LOGIN;
   const log: string[] = [];
   const stop = (phase: SendPhase, message: string): SendResult => {
     log.push(`✗ ${message}`);
     return { ok: false, log, failedAt: phase };
   };
+
+  // Every other failure here comes back as a SendResult, so this one does too
+  // rather than rejecting the promise at the caller.
+  let phoneNationalDigits: string;
+  let pin: string;
+  try {
+    ({ phoneNationalDigits, pin } = await requireAgent());
+  } catch (e: any) {
+    return stop("opening", e?.message ?? String(e));
+  }
 
   // telebirr blocks self-transfers, so a send to the signed-in number can never
   // succeed — the recipient screen just refuses to advance. Catch it here.
@@ -641,6 +661,10 @@ export async function signInAndSend(
   }
 
   try {
+    // Refused before telebirr is opened: without the service this run could only
+    // get as far as the foreground app and then fail on its first read.
+    requireAccessibility();
+
     onPhase("opening");
     const pkg = await openKnownApp(TELEBIRR);
     log.push(`opened ${pkg}`);

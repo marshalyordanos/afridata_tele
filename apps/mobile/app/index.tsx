@@ -10,10 +10,9 @@ import {
   TextInput,
   Alert,
 } from "react-native";
-import { useRouter } from "expo-router";
+import { useRouter, Redirect } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
-import AutoAccessibility from "auto-accessibility";
 import { TELEBIRR, openKnownApp } from "../lib/apps";
 import {
   syncTelebirr,
@@ -35,6 +34,10 @@ import {
   EMPTY_SNAPSHOT,
 } from "../lib/telebirrData";
 import { C, R, CARD_SHADOW, TABULAR } from "../lib/theme";
+import { useAccessibility, ACCESS_OFF_MESSAGE } from "../lib/accessibility";
+import { useAgent } from "../lib/agent";
+import { useRealtime } from "../lib/realtime";
+import { withTelebirr } from "../lib/telebirrLock";
 
 interface Step {
   phase: SyncPhase | SendPhase;
@@ -75,6 +78,11 @@ export default function TelebirrAccount() {
   const [recipientDraft, setRecipientDraft] = useState("");
   const [editingRecipient, setEditingRecipient] = useState(false);
   const [error, setError] = useState("");
+  const access = useAccessibility();
+  const { agent, loading: agentLoading } = useAgent();
+  // Live requests from customers who picked this agent on the web page.
+  // The list itself lives on the notifications screen; here it is just a badge.
+  const { unread, state: liveState } = useRealtime();
   const alive = useRef(true);
   // Ref to the latest sync so the once-on-open effect can call it without
   // taking sync's changing dependencies as its own.
@@ -96,19 +104,16 @@ export default function TelebirrAccount() {
   // until accessibility is on (nothing can be read without it) and skipped when
   // the user has turned auto off. Runs a single time per mount.
   useEffect(() => {
-    if (didAutoSync.current || !autoSync) return;
-    let enabled = false;
-    try {
-      enabled = AutoAccessibility.isServiceEnabled();
-    } catch {
-      enabled = false;
-    }
-    if (!enabled) return;
+    // Waits for a service that is actually bound, not just switched on: the
+    // read's first scrape fails during the gap between the two. Because this
+    // watches the live state, the read also runs on its own the moment access
+    // is granted, rather than only when the app was opened with it already on.
+    if (didAutoSync.current || !autoSync || !access.on) return;
     didAutoSync.current = true;
     // A beat after mount so the first paint shows the saved snapshot first.
     const t = setTimeout(() => syncRef.current(), 600);
     return () => clearTimeout(t);
-  }, [autoSync]);
+  }, [autoSync, access.on]);
 
   const syncing = phase !== null && phase !== "done";
   const sending = sendPhase !== null && sendPhase !== "done";
@@ -120,11 +125,24 @@ export default function TelebirrAccount() {
 
   const sync = useCallback(async () => {
     if (busy) return;
+    if (!access.on) {
+      setError(ACCESS_OFF_MESSAGE);
+      return;
+    }
     setError("");
     try {
-      const { balance, transactions } = await syncTelebirr(
-        (p) => alive.current && setPhase(p)
+      // Skipped outright when a deposit lookup already has telebirr: this read
+      // is a convenience, and starting a second one is what made telebirr open
+      // in a loop. `withTelebirr` returns null rather than waiting, because a
+      // refresh that happens two minutes late is worth nothing.
+      const result = await withTelebirr("screen sync", () =>
+        syncTelebirr((p) => alive.current && setPhase(p))
       );
+      if (!result) {
+        if (alive.current) setPhase(null);
+        return;
+      }
+      const { balance, transactions } = result;
       const next: TelebirrSnapshot = {
         ...snapshot,
         balance: balance ?? snapshot.balance,
@@ -140,7 +158,7 @@ export default function TelebirrAccount() {
     } finally {
       if (alive.current) setPhase(null);
     }
-  }, [snapshot, busy]);
+  }, [snapshot, busy, access.on]);
 
   // Always call through this, so the auto-sync effect reaches the current sync.
   syncRef.current = sync;
@@ -174,6 +192,12 @@ export default function TelebirrAccount() {
 
   // Real money leaves the account here, so the tap is confirmed first.
   const sendOneBirr = useCallback(() => {
+    // Without the service the send would open telebirr and then stall on its
+    // first read, which looks like the app half-working. Refuse it here.
+    if (!access.on) {
+      setError(ACCESS_OFF_MESSAGE);
+      return;
+    }
     const to = snapshot.sendRecipientDigits;
     if (to.length < 9) {
       setEditingRecipient(true);
@@ -188,7 +212,7 @@ export default function TelebirrAccount() {
         { text: `Send ${SEND_AMOUNT_BIRR} br`, style: "destructive", onPress: runSend },
       ]
     );
-  }, [snapshot.sendRecipientDigits, runSend]);
+  }, [snapshot.sendRecipientDigits, runSend, access.on]);
 
   const openApp = useCallback(async () => {
     setError("");
@@ -205,6 +229,13 @@ export default function TelebirrAccount() {
 
   const recent = snapshot.transactions.slice(0, 3);
 
+  // Nothing on this screen means anything until an agent has enrolled: the
+  // credentials the automation signs in with are theirs. Held blank for the one
+  // frame it takes to read storage, so enrolment does not flash past an agent
+  // who is already signed in.
+  if (agentLoading) return <View style={s.screen} />;
+  if (!agent) return <Redirect href="/enroll" />;
+
   return (
     <ScrollView style={s.screen} contentContainerStyle={{ paddingBottom: 28 }}>
       <View style={{ height: insets.top }} />
@@ -212,21 +243,106 @@ export default function TelebirrAccount() {
       {/* Header — this is the app's home, so there is nowhere to go back to. */}
       <View style={s.header}>
         <View style={{ flex: 1 }}>
-          <Text style={s.title}>telebirr</Text>
-          <Text style={s.subtitle}>read by AutoPilot</Text>
+          <Text style={s.title} numberOfLines={1}>
+            telebirr
+          </Text>
+          <Text style={s.subtitle} numberOfLines={1}>
+            read by AutoPilot
+          </Text>
         </View>
-        <View style={s.badge}>
-          <View style={s.badgeDot} />
-          <Text style={s.badgeText}>linked</Text>
+        {/* The socket's state, not the enrolment's: an agent needs to know at a
+            glance whether a customer's check would actually reach this phone. */}
+        <View style={[s.badge, liveState !== "online" && s.badgeOff]}>
+          <View style={[s.badgeDot, liveState !== "online" && s.badgeDotOff]} />
+          <Text style={[s.badgeText, liveState !== "online" && s.badgeTextOff]}>
+            {liveState === "online" ? "live" : liveState === "connecting" ? "linking" : "offline"}
+          </Text>
         </View>
         <Pressable
-          style={[s.iconBtn, { marginLeft: 2, marginRight: -11 }]}
+          style={[s.iconBtn, { marginLeft: 2 }]}
+          onPress={() => router.push("/notifications")}
+          hitSlop={6}
+        >
+          <Feather name="bell" size={19} color={unread > 0 ? C.accent : C.dim} />
+          {unread > 0 && (
+            <View style={s.badgeCount}>
+              <Text style={s.badgeCountText}>{unread > 9 ? "9+" : unread}</Text>
+            </View>
+          )}
+        </Pressable>
+        <Pressable
+          style={[s.iconBtn, { marginLeft: -8 }]}
           onPress={() => router.push("/dashboard")}
           hitSlop={6}
         >
           <Feather name="sliders" size={19} color={C.dim} />
         </Pressable>
+        <Pressable
+          style={[s.iconBtn, { marginRight: -11 }]}
+          onPress={() => router.push("/settings")}
+          hitSlop={6}
+        >
+          <Feather name="settings" size={19} color={C.dim} />
+        </Pressable>
       </View>
+
+      {/* Accessibility — first thing on the screen, because nothing below it can
+          run without the service. Full card while it is off, one slim line once
+          it is on, so the state is always visible without taking over. */}
+      {access.on ? (
+        <Pressable
+          style={({ pressed }) => [s.accessOk, pressed && s.pressed]}
+          onPress={() => router.push("/settings")}
+        >
+          <Feather name="shield" size={15} color={C.green} />
+          <Text style={s.accessOkText}>Accessibility on</Text>
+          <Text style={s.accessOkDim}>AutoPilot can drive telebirr</Text>
+          <Feather name="chevron-right" size={14} color="#9fbcab" />
+        </Pressable>
+      ) : (
+        <View style={s.accessCard}>
+          <View style={s.accessHead}>
+            <View style={s.accessTile}>
+              {access.state === "checking" || access.state === "starting" ? (
+                <ActivityIndicator size="small" color={C.amber} />
+              ) : (
+                <Feather name="shield-off" size={18} color={C.amber} />
+              )}
+            </View>
+            <View style={{ flex: 1, gap: 3 }}>
+              <Text style={s.accessTitle}>
+                {access.state === "starting"
+                  ? "Accessibility starting…"
+                  : access.state === "checking"
+                  ? "Checking accessibility…"
+                  : "Accessibility is off"}
+              </Text>
+              <Text style={s.accessDim}>
+                {access.state === "starting"
+                  ? "Android is connecting the service — one moment."
+                  : "Sync and send cannot read or tap telebirr without it."}
+              </Text>
+            </View>
+          </View>
+
+          {access.state !== "starting" && (
+            <Pressable
+              style={({ pressed }) => [s.accessBtn, pressed && s.pressed]}
+              onPress={access.open}
+              disabled={access.state === "checking"}
+            >
+              <Feather name="unlock" size={15} color="#fff" />
+              <Text style={s.accessBtnText}>Turn on accessibility</Text>
+            </Pressable>
+          )}
+
+          {access.returnedWithoutAccess && (
+            <Text style={s.accessNote}>
+              Still off — the AutoPilot switch has to be turned on. This updates by itself.
+            </Text>
+          )}
+        </View>
+      )}
 
       {/* Balance */}
       <View style={s.card}>
@@ -254,9 +370,9 @@ export default function TelebirrAccount() {
         </View>
 
         <View style={s.accountRow}>
-          <Text style={s.phone}>{maskPhone(snapshot.phoneNationalDigits)}</Text>
+          <Text style={s.phone}>{maskPhone(agent.phoneNationalDigits)}</Text>
           <View style={s.dot} />
-          <Text style={s.dim}>{snapshot.accountKind}</Text>
+          <Text style={s.dim}>{agent.fullName}</Text>
         </View>
 
         <View style={s.divider} />
@@ -479,6 +595,74 @@ const s = StyleSheet.create({
   },
   badgeDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: C.green },
   badgeText: { fontSize: 12, fontWeight: "600", color: C.green },
+  badgeOff: { backgroundColor: C.surfaceAlt },
+  badgeDotOff: { backgroundColor: C.faint },
+  badgeTextOff: { color: C.faint },
+
+  accessOk: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    marginHorizontal: 20,
+    marginBottom: 12,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: R.row,
+    backgroundColor: C.greenSoft,
+  },
+  accessOkText: { fontSize: 12, fontWeight: "600", color: C.green },
+  accessOkDim: { flex: 1, fontSize: 12, color: "#3f8361" },
+
+  accessCard: {
+    marginHorizontal: 20,
+    marginBottom: 12,
+    padding: 14,
+    gap: 12,
+    borderRadius: R.card,
+    backgroundColor: C.amberSoft,
+    borderWidth: 1,
+    borderColor: "#f0dcb4",
+  },
+  accessHead: { flexDirection: "row", alignItems: "center", gap: 11 },
+  accessTile: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#f8e8c9",
+  },
+  accessTitle: { fontSize: 14, fontWeight: "600", color: "#6d4d11" },
+  accessDim: { fontSize: 12, color: C.amber, lineHeight: 17 },
+  accessBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    height: 42,
+    borderRadius: R.btn,
+    backgroundColor: C.accent,
+  },
+  accessBtnText: { fontSize: 13, fontWeight: "600", color: "#fff" },
+
+  // Unread count on the bell. Absolute so it rides the icon's top-right corner
+  // without changing the header's layout when it appears and disappears.
+  badgeCount: {
+    position: "absolute",
+    top: 6,
+    right: 5,
+    minWidth: 17,
+    height: 17,
+    paddingHorizontal: 4,
+    borderRadius: 9,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: C.red,
+    borderWidth: 2,
+    borderColor: C.ground,
+  },
+  badgeCountText: { fontSize: 10, fontWeight: "700", color: "#fff", ...TABULAR },
+  accessNote: { fontSize: 11, color: C.amber, lineHeight: 16 },
 
   card: {
     marginHorizontal: 20,

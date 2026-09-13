@@ -21,7 +21,8 @@
         "expo-build-properties",
         {
           "android": {
-            "ndkVersion": "27.1.12297006"
+            "ndkVersion": "27.1.12297006",
+            "kotlinVersion": "1.9.24"
           }
         }
       ],

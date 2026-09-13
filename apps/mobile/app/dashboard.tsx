@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState } from "react";
 import {
   View,
   Text,
@@ -10,8 +10,9 @@ import {
 } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import { Link } from "expo-router";
-import AutoAccessibility from "auto-accessibility";
 import { Macro, loadMacros, saveMacros, runMacro, RunResult } from "../lib/macros";
+import { useAccessibility } from "../lib/accessibility";
+import { useAgent } from "../lib/agent";
 import { TELEBIRR, openKnownApp } from "../lib/apps";
 import {
   buildTelebirrLoginMacro,
@@ -56,27 +57,20 @@ const DEMOS: Macro[] = [
 ];
 
 export default function Dashboard() {
-  const [enabled, setEnabled] = useState(false);
+  // Same live state as the home banner: bound-and-callable, not just switched on.
+  const access = useAccessibility();
+  const enabled = access.on;
+  // Macros sign in as whoever enrolled on this handset.
+  const { agent } = useAgent();
   const [macros, setMacros] = useState<Macro[]>([]);
   const [result, setResult] = useState<RunResult | null>(null);
   const [running, setRunning] = useState<string | null>(null);
   const [openError, setOpenError] = useState("");
   const [amount, setAmount] = useState("");
 
-  const refresh = useCallback(() => {
-    try {
-      setEnabled(AutoAccessibility.isServiceEnabled());
-    } catch {
-      setEnabled(false);
-    }
-  }, []);
-
   useEffect(() => {
-    refresh();
     loadMacros().then((m) => setMacros(m.length ? m : DEMOS));
-    const t = setInterval(refresh, 2000);
-    return () => clearInterval(t);
-  }, [refresh]);
+  }, []);
 
   const run = async (macro: Macro) => {
     setRunning(macro.id);
@@ -98,6 +92,10 @@ export default function Dashboard() {
   // Real money leaves the account at the end of this one, so the amount and the
   // recipient get read back once before the macro starts.
   const sendMoney = () => {
+    if (!agent) {
+      Alert.alert("Not signed in", "Enrol with your agent number and PIN first.");
+      return;
+    }
     const value = amount.trim();
     if (!(Number(value) > 0)) {
       Alert.alert("Enter an amount", "Type how much to send first.");
@@ -109,7 +107,7 @@ export default function Dashboard() {
         "AutoPilot fills the form and taps Send; telebirr will still ask for your PIN.",
       [
         { text: "Cancel", style: "cancel" },
-        { text: "Send", onPress: () => run(buildTelebirrSendMoneyMacro(value)) },
+        { text: "Send", onPress: () => agent && run(buildTelebirrSendMoneyMacro(value, agent)) },
       ],
     );
   };
@@ -125,17 +123,23 @@ export default function Dashboard() {
       {/* Service status */}
       <View style={[styles.card, enabled ? styles.ok : styles.warn]}>
         <Text style={styles.cardTitle}>
-          {enabled ? "✅ Accessibility enabled" : "⚠️ Accessibility OFF"}
+          {enabled
+            ? "✅ Accessibility enabled"
+            : access.state === "starting"
+            ? "⏳ Accessibility starting"
+            : "⚠️ Accessibility OFF"}
         </Text>
         <Text style={styles.dim}>
           {enabled
             ? "The engine can now open apps, click, and scrape."
+            : access.state === "starting"
+            ? "Switched on — Android is still connecting the service."
             : "Turn on AutoPilot in Accessibility settings to enable automation."}
         </Text>
         {!enabled && (
           <Pressable
             style={styles.btn}
-            onPress={() => AutoAccessibility.openAccessibilitySettings()}
+            onPress={access.open}
           >
             <Text style={styles.btnText}>Open Accessibility Settings</Text>
           </Pressable>
@@ -151,8 +155,8 @@ export default function Dashboard() {
         </Text>
         <Pressable
           style={[styles.btn, styles.btnGreen]}
-          onPress={() => run(buildTelebirrLoginMacro())}
-          disabled={!!running}
+          onPress={() => agent && run(buildTelebirrLoginMacro(agent))}
+          disabled={!!running || !agent}
         >
           <Text style={styles.btnText}>
             {running === "telebirr-login" ? "signing in…" : "🔐 Sign in to telebirr"}

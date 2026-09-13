@@ -1,7 +1,10 @@
-import { Router } from "express";
+import { Router, type Response } from "express";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import { prisma } from "../prisma.js";
+import { notifyAgent } from "../lib/realtime.js";
+import { openRequest } from "../lib/depositRequests.js";
+import { phoneSchema } from "../lib/phone.js";
 
 export const walletRouter = Router();
 
@@ -13,6 +16,126 @@ const checkSchema = z.object({
 const withdrawSchema = z.object({
   userId: z.string().min(1),
   amount: z.number().positive(),
+});
+
+const agentIdSchema = z.string().min(1);
+
+/**
+ * Turns a failed parse into one slug the client can show a message for.
+ *
+ * The raw flattened issue tree is no use to a customer-facing page — it can
+ * only render what it recognises — so the field that failed becomes the code.
+ */
+function inputError(error: z.ZodError): string {
+  const fields = z.flattenError(error).fieldErrors as Record<string, unknown>;
+  if (fields.phone) return "INVALID_PHONE";
+  if (fields.amount) return "INVALID_AMOUNT";
+  if (fields.reference) return "INVALID_REFERENCE";
+  return "INVALID_BODY";
+}
+
+const depositNoticeSchema = z.object({
+  /** Whatever the customer typed. The server never checks it — the phone does. */
+  reference: z.string().trim().min(1).max(64),
+  agentId: agentIdSchema,
+  /**
+   * The customer's page makes this up and is already listening on it, so the
+   * answer has somewhere to go the instant the handset reports back.
+   */
+  requestId: z.string().regex(/^[a-zA-Z0-9-]{8,64}$/),
+});
+
+const withdrawNoticeSchema = z.object({
+  /** The customer's own telebirr number — the agent sends the cash-out to it. */
+  phone: phoneSchema,
+  /** What the customer wants in cash. Capped only to keep typos out. */
+  amount: z.number().positive().max(1_000_000),
+  agentId: agentIdSchema,
+});
+
+/**
+ * The agent a customer named, if they are real and can still take business.
+ *
+ * Checking separates "the agent's phone is offline" from "that agent does not
+ * exist", which the `notified` flag alone could not tell apart. Writes the
+ * response and returns null when there is nothing to notify.
+ */
+async function resolveAgent(agentId: string, res: Response) {
+  const agent = await prisma.agent.findUnique({
+    where: { id: agentId },
+    select: { id: true, status: true },
+  });
+
+  if (!agent) {
+    res.status(404).json({ error: "AGENT_NOT_FOUND" });
+    return null;
+  }
+  if (agent.status !== "ACTIVE") {
+    res.status(403).json({ error: "AGENT_NOT_ACTIVE" });
+    return null;
+  }
+  return agent;
+}
+
+/**
+ * Hands a reference number to the agent's handset to look up.
+ *
+ * The server cannot confirm a reference — it never sees telebirr. So this only
+ * starts the round trip: the phone opens telebirr, finds the transaction and
+ * reports back through `/api/agents/deposit/resolve`, which is what the
+ * customer's page is waiting on. Returning here means "asked", not "confirmed".
+ */
+walletRouter.post("/deposit/notify", async (req, res) => {
+  const parsed = depositNoticeSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: inputError(parsed.error) });
+  }
+
+  const agent = await resolveAgent(parsed.data.agentId, res);
+  if (!agent) return;
+
+  const { reference, requestId } = parsed.data;
+  await openRequest({ requestId, agentId: agent.id, reference });
+
+  const delivered = await notifyAgent({
+    kind: "deposit",
+    reference,
+    requestId,
+    agentId: agent.id,
+    at: Date.now(),
+  });
+
+  res.json({ reference, requestId, notified: delivered > 0 });
+});
+
+/**
+ * Asks an agent for cash out.
+ *
+ * The mirror of the deposit above and just as unverified: there is no customer
+ * account here, so no balance to debit and nothing to check the amount against.
+ * The customer gives the agent their own number and what they want in cash; it
+ * lands on the agent's phone, and the agent pays out — or does not — on their
+ * own judgement. `/withdraw` below is the one that actually moves money, once
+ * there is a customer account behind it.
+ */
+walletRouter.post("/withdraw/notify", async (req, res) => {
+  const parsed = withdrawNoticeSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: inputError(parsed.error) });
+  }
+
+  const agent = await resolveAgent(parsed.data.agentId, res);
+  if (!agent) return;
+
+  const delivered = await notifyAgent({
+    kind: "withdrawal",
+    amount: parsed.data.amount,
+    phone: parsed.data.phone,
+    agentId: agent.id,
+    at: Date.now(),
+  });
+
+  res.json({ amount: parsed.data.amount, phone: parsed.data.phone, notified: delivered > 0 });
 });
 
 /**

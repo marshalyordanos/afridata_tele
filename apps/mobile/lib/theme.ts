@@ -23,6 +23,7 @@ export const C = {
   red: "#b42318",
   redSoft: "#fdeceb",
   amber: "#8a6116",
+  amberSoft: "#fdf2e0",
 } as const;
 
 export const R = { btn: 10, row: 12, card: 14, pill: 999 } as const;

@@ -1,6 +1,7 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Dimensions, PixelRatio } from "react-native";
 import AutoAccessibility from "auto-accessibility";
+import { requireAccessibility } from "./accessibility";
 import { resolveFirst } from "./apps";
 
 /** A single automation step. */
@@ -116,6 +117,9 @@ export async function runMacro(macro: Macro): Promise<RunResult> {
   const log: string[] = [];
   const scraped: RunResult["scraped"] = {};
   try {
+    // An openApp step would launch its app without the service — only the steps
+    // after it fail — so the whole macro is refused before anything is opened.
+    requireAccessibility();
     for (const [i, step] of macro.steps.entries()) {
       const tag = `#${i + 1} ${step.type}`;
       switch (step.type) {

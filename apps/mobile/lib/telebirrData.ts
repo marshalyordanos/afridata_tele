@@ -65,7 +65,8 @@ export const EMPTY_SNAPSHOT: TelebirrSnapshot = {
   // Nothing real is known until the first read from telebirr — start blank
   // rather than showing an invented balance or invented receipts.
   balance: null,
-  phoneNationalDigits: "986680094",
+  // Filled in from the enrolled agent — there is no default account.
+  phoneNationalDigits: "",
   accountKind: "Personal",
   // Default recipient (+251 986680093). Must not be the signed-in number
   // above — telebirr refuses a self-transfer.
