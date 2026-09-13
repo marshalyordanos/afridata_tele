@@ -6,10 +6,11 @@ dist/
 dist-ssr/
 build/
 
-# Environment
-# .env
-# .env.local
-# .env.*.local
+# Environment — never commit generated secrets (AUTH_SECRET, DB password).
+.env
+.env.local
+.env.*.local
+!.env.example
 
 # Database
 *.db

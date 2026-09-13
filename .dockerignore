@@ -1,0 +1,30 @@
+# Dependencies are installed inside the image from the lockfile.
+node_modules
+**/node_modules
+
+# Build output
+dist
+**/dist
+build
+**/build
+
+# The mobile app is not containerised.
+apps/mobile
+
+# Local databases and env files — never bake secrets into an image.
+*.db
+*.db-journal
+**/.env
+**/.env.*
+!**/.env.example
+
+# Generated Prisma client is rebuilt during the image build.
+apps/server/src/generated
+
+# VCS, editor, OS noise
+.git
+.gitignore
+.idea
+.vscode
+**/.DS_Store
+*.log
