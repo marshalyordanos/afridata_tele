@@ -11,7 +11,13 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { io } from "socket.io-client";
 import { API_URL } from "./api";
 import { useAgent } from "./agent";
-import { queueLookup, type ConfirmStage } from "./autoConfirm";
+import {
+  fetchHistory,
+  markHandled,
+  queueLookup,
+  type ConfirmStage,
+  type StoredRequest,
+} from "./autoConfirm";
 
 /**
  * The handset's live link to the server, shared by every screen.
@@ -56,6 +62,40 @@ type CustomerRequestEvent = { at: number } & (
   | { kind: "deposit"; reference: string; requestId: string }
   | { kind: "withdrawal"; amount: number; phone: string }
 );
+
+/** The server's record of how a check ended — authoritative over local state. */
+interface SettledEvent {
+  requestId: string;
+  reference: string;
+  status: "CONFIRMED" | "NOT_FOUND" | "FAILED";
+  amount: number | null;
+  reason: string | null;
+  resolvedAt: string | null;
+}
+
+const STAGE_OF: Record<StoredRequest["status"], ConfirmStage> = {
+  PENDING: "reading",
+  CONFIRMED: "confirmed",
+  NOT_FOUND: "not_found",
+  FAILED: "failed",
+};
+
+/** A stored row as the list holds it. */
+function fromStored(row: StoredRequest): CustomerRequest {
+  const at = Date.parse(row.createdAt) || Date.now();
+  return {
+    kind: "deposit",
+    id: `deposit-${row.reference}-${at}`,
+    requestId: row.requestId,
+    reference: row.reference,
+    at,
+    // History has been seen by definition — it is not new unread news.
+    read: true,
+    stage: STAGE_OF[row.status],
+    amount: row.amount ?? undefined,
+    reason: row.reason ?? undefined,
+  };
+}
 
 /** How many to keep. Older ones fall off the end rather than growing forever. */
 const MAX_ALERTS = 50;
@@ -105,6 +145,37 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
     });
   }, []);
 
+  // The server's history wins over the device's copy: it includes checks
+  // answered while the app was shut, and it closes off any the phone abandoned.
+  // Everything it returns is marked handled so restoring can never set a
+  // telebirr lookup running for a check that is already over.
+  useEffect(() => {
+    if (!restored || !agent) return;
+    let alive = true;
+
+    fetchHistory(agent.phone, agent.pin).then((rows) => {
+      if (!alive || !rows) return;
+      for (const row of rows) markHandled(row.requestId);
+
+      setAlerts((current) => {
+        const fromServer = rows.map(fromStored);
+        const known = new Set(rows.map((row) => row.requestId));
+        // Withdrawals are push-only — the server keeps no row for them — so the
+        // local ones are kept and merged in by time.
+        const localOnly = current.filter(
+          (item) => item.kind !== "deposit" || !known.has(item.requestId),
+        );
+        return [...fromServer, ...localOnly]
+          .sort((a, b) => b.at - a.at)
+          .slice(0, MAX_ALERTS);
+      });
+    });
+
+    return () => {
+      alive = false;
+    };
+  }, [restored, agent?.id, agent?.phone, agent?.pin]);
+
   useEffect(() => {
     if (!restored) return;
     AsyncStorage.setItem(KEY, JSON.stringify(alerts)).catch(() => {});
@@ -152,6 +223,24 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
           );
         });
       }
+    });
+
+    // The outcome as the server recorded it. The phone that ran the lookup
+    // already knows, but this also reaches a second device and a phone that
+    // reconnected mid-check.
+    socket.on("deposit:settled", (event: SettledEvent) => {
+      setAlerts((current) =>
+        current.map((item) =>
+          item.kind === "deposit" && item.requestId === event.requestId
+            ? {
+                ...item,
+                stage: STAGE_OF[event.status],
+                amount: event.amount ?? undefined,
+                reason: event.reason ?? undefined,
+              }
+            : item,
+        ),
+      );
     });
 
     return () => {
