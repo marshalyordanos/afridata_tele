@@ -15,7 +15,8 @@ import {
   TelebirrTransaction,
   EMPTY_SNAPSHOT,
 } from "../lib/telebirrData";
-import { C, R, TABULAR } from "../lib/theme";
+import { C, R, SP, T, TABULAR } from "../lib/theme";
+import { ScreenHeader, HeaderButton } from "../components/ScreenHeader";
 
 type Filter = "all" | "in" | "out";
 
@@ -85,29 +86,21 @@ export default function Transactions() {
 
   return (
     <View style={s.screen}>
-      <View style={{ height: insets.top }} />
-
-      <View style={s.header}>
-        <Pressable style={s.iconBtn} onPress={() => router.back()} hitSlop={6}>
-          <Feather name="chevron-left" size={22} color={C.text} />
-        </Pressable>
-        <View style={{ flex: 1 }}>
-          <Text style={s.title}>Transactions</Text>
-          <Text style={s.subtitle}>
-            {snapshot.transactions.length} held · read {relativeTime(snapshot.readAt)}
-          </Text>
-        </View>
-        <Pressable
-          style={[s.iconBtn, { marginLeft: 0, marginRight: -11 }]}
-          onPress={() => {
-            setSearching((v) => !v);
-            setQuery("");
-          }}
-          hitSlop={6}
-        >
-          <Feather name={searching ? "x" : "search"} size={20} color={C.text} />
-        </Pressable>
-      </View>
+      <ScreenHeader
+        title="Transactions"
+        subtitle={`${snapshot.transactions.length} held · read ${relativeTime(snapshot.readAt)}`}
+        back
+        right={
+          <HeaderButton
+            icon={searching ? "x" : "search"}
+            tint={C.text}
+            onPress={() => {
+              setSearching((v) => !v);
+              setQuery("");
+            }}
+          />
+        }
+      />
 
       {searching && (
         <TextInput
@@ -172,7 +165,7 @@ const s = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 10,
-    paddingHorizontal: 20,
+    paddingHorizontal: SP.gutter,
     paddingTop: 4,
     paddingBottom: 14,
   },
@@ -184,11 +177,9 @@ const s = StyleSheet.create({
     justifyContent: "center",
     borderRadius: R.row,
   },
-  title: { fontSize: 19, fontWeight: "600", color: C.text, letterSpacing: -0.3 },
-  subtitle: { fontSize: 12, color: C.dim, marginTop: 1 },
 
   search: {
-    marginHorizontal: 20,
+    marginHorizontal: SP.gutter,
     marginBottom: 12,
     height: 44,
     paddingHorizontal: 14,
@@ -203,7 +194,7 @@ const s = StyleSheet.create({
   tabs: {
     flexDirection: "row",
     gap: 6,
-    marginHorizontal: 20,
+    marginHorizontal: SP.gutter,
     padding: 4,
     borderRadius: R.row,
     borderWidth: 1,
@@ -217,16 +208,16 @@ const s = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 10,
-    paddingHorizontal: 20,
+    paddingHorizontal: SP.gutter,
     paddingTop: 16,
   },
-  dim: { fontSize: 12, color: C.dim },
+  dim: { ...T.small, color: C.dim },
   dot: { width: 3, height: 3, borderRadius: 2, backgroundColor: C.borderStrong },
   sumIn: { fontSize: 12, fontWeight: "600", color: C.green },
   sumOut: { fontSize: 12, fontWeight: "600", color: C.red },
 
   day: {
-    paddingHorizontal: 20,
+    paddingHorizontal: SP.gutter,
     paddingTop: 20,
     paddingBottom: 10,
     fontSize: 11,
@@ -237,7 +228,7 @@ const s = StyleSheet.create({
   },
 
   card: {
-    marginHorizontal: 20,
+    marginHorizontal: SP.gutter,
     marginBottom: 8,
     backgroundColor: C.surface,
     borderWidth: 1,

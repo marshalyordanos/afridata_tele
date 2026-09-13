@@ -1,6 +1,9 @@
+import { View } from "react-native";
 import { Stack } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { SafeAreaProvider } from "react-native-safe-area-context";
+import { useFonts } from "expo-font";
+import Feather from "@expo/vector-icons/Feather";
 import { C } from "../lib/theme";
 import { RealtimeProvider } from "../lib/realtime";
 
@@ -8,6 +11,18 @@ import { RealtimeProvider } from "../lib/realtime";
 const LIGHT = { headerShown: false, contentStyle: { backgroundColor: C.ground } } as const;
 
 export default function Layout() {
+  // Every icon in the app is a Feather glyph, and the icon set renders nothing
+  // at all until its font is in memory — which showed up as buttons that were
+  // there and tappable but invisible. Loaded here so it is in memory before the
+  // first screen paints. Deliberately NOT a gate: if the font cannot be loaded
+  // the app still has to run, with text-only buttons, rather than never
+  // painting at all.
+  const [fontsLoaded, fontError] = useFonts(Feather.font);
+  if (fontError) console.warn("[fonts] Feather failed to load:", fontError);
+  if (!fontsLoaded && !fontError) {
+    console.log("[fonts] Feather still loading");
+  }
+
   return (
     <SafeAreaProvider>
       {/* Dark status-bar icons: the app now opens on a light screen. */}
@@ -17,8 +32,13 @@ export default function Layout() {
       <RealtimeProvider>
         <Stack
           screenOptions={{
-            headerStyle: { backgroundColor: "#0b0f1a" },
-            headerTintColor: "#e6edf7",
+            // The two developer screens keep a native header; it is the app's
+            // light one now, so they no longer arrive under a navy bar that
+            // belongs to a palette nothing else uses.
+            headerStyle: { backgroundColor: C.ground },
+            headerTintColor: C.text,
+            headerTitleStyle: { fontWeight: "700" },
+            headerShadowVisible: false,
             contentStyle: { backgroundColor: C.ground },
           }}
         >

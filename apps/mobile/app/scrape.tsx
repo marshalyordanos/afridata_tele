@@ -9,6 +9,7 @@ import {
 } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import AutoAccessibility, { ScrapedNode } from "auto-accessibility";
+import { C, R, SP, T } from "../lib/theme";
 
 /**
  * Live scraping playground: type a package, open it, then dump every text node
@@ -74,34 +75,38 @@ export default function Scrape() {
 }
 
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: "#0b0f1a", padding: 16 },
+  screen: { flex: 1, backgroundColor: C.ground, padding: SP.lg },
   input: {
-    backgroundColor: "#141b2e",
-    color: "#e6edf7",
-    borderRadius: 10,
-    padding: 12,
+    backgroundColor: C.surface,
+    color: C.text,
+    borderRadius: R.btn,
+    paddingHorizontal: SP.md,
+    height: 46,
     borderWidth: 1,
-    borderColor: "#233047",
+    borderColor: C.border,
+    ...T.mono,
+    fontSize: 14,
   },
-  row: { flexDirection: "row", gap: 10, marginTop: 10 },
+  row: { flexDirection: "row", gap: SP.sm, marginTop: SP.sm },
   btn: {
     flex: 1,
-    backgroundColor: "#2b6cff",
-    borderRadius: 10,
-    paddingVertical: 12,
+    backgroundColor: C.accent,
+    borderRadius: R.btn,
+    height: 44,
     alignItems: "center",
+    justifyContent: "center",
   },
-  btnAlt: { backgroundColor: "#1f7a4d" },
-  btnText: { color: "white", fontWeight: "700" },
-  dim: { color: "#8ba0c0", marginTop: 10, fontSize: 12 },
+  btnAlt: { backgroundColor: C.green },
+  btnText: { ...T.small, fontWeight: "700", color: "#fff" },
+  dim: { ...T.small, color: C.dim, marginTop: SP.sm },
   node: {
-    backgroundColor: "#141b2e",
-    borderRadius: 8,
-    padding: 10,
-    marginBottom: 6,
+    backgroundColor: C.surface,
+    borderRadius: R.tile,
+    padding: SP.md,
+    marginBottom: SP.sm,
     borderWidth: 1,
-    borderColor: "#233047",
+    borderColor: C.border,
   },
-  nodeText: { color: "#e6edf7", fontSize: 14 },
-  nodeMeta: { color: "#6f83a3", fontSize: 11, marginTop: 2 },
+  nodeText: { ...T.body, color: C.text },
+  nodeMeta: { ...T.mono, fontSize: 10.5, color: C.faint, marginTop: 2 },
 });

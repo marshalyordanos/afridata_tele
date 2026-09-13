@@ -3,7 +3,9 @@ import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import { prisma } from "../prisma.js";
 import { notifyAgent } from "../lib/realtime.js";
+import { openCashOut } from "../lib/cashOutRequests.js";
 import { openRequest } from "../lib/depositRequests.js";
+import { resolveDepositForCustomer } from "../lib/realtime.js";
 import { phoneSchema } from "../lib/phone.js";
 
 export const walletRouter = Router();
@@ -95,7 +97,26 @@ walletRouter.post("/deposit/notify", async (req, res) => {
   if (!agent) return;
 
   const { reference, requestId } = parsed.data;
-  await openRequest({ requestId, agentId: agent.id, reference });
+  const request = await openRequest({ requestId, agentId: agent.id, reference });
+
+  // A double-click, a refresh, a retry: the same id asked twice. If the phone
+  // has already answered it, replay that answer instead of sending it back into
+  // telebirr for a check that is over.
+  if (request.status !== "PENDING") {
+    resolveDepositForCustomer(
+      request.status === "CONFIRMED"
+        ? { requestId, status: "confirmed", reference: request.reference, amount: request.amount! }
+        : request.status === "FAILED"
+          ? {
+              requestId,
+              status: "failed",
+              reference: request.reference,
+              reason: request.reason ?? "The telebirr read failed.",
+            }
+          : { requestId, status: "not_found", reference: request.reference },
+    );
+    return res.json({ reference, requestId, notified: true, replayed: true });
+  }
 
   const delivered = await notifyAgent({
     kind: "deposit",
@@ -127,15 +148,31 @@ walletRouter.post("/withdraw/notify", async (req, res) => {
   const agent = await resolveAgent(parsed.data.agentId, res);
   if (!agent) return;
 
-  const delivered = await notifyAgent({
-    kind: "withdrawal",
-    amount: parsed.data.amount,
-    phone: parsed.data.phone,
+  // The row comes first, and the push second. A cash-out that is pushed but
+  // never recorded is a transfer nobody can account for afterwards, so if the
+  // write fails the request fails here rather than reaching a handset that
+  // would pay it out against no record at all.
+  const request = await openCashOut({
     agentId: agent.id,
-    at: Date.now(),
+    phone: parsed.data.phone,
+    amount: parsed.data.amount,
   });
 
-  res.json({ amount: parsed.data.amount, phone: parsed.data.phone, notified: delivered > 0 });
+  const delivered = await notifyAgent({
+    kind: "withdrawal",
+    requestId: request.requestId,
+    amount: request.amount,
+    phone: request.phone,
+    agentId: agent.id,
+    at: request.createdAt.getTime(),
+  });
+
+  res.json({
+    amount: request.amount,
+    phone: request.phone,
+    requestId: request.requestId,
+    notified: delivered > 0,
+  });
 });
 
 /**

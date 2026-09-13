@@ -18,6 +18,14 @@ import {
   type ConfirmStage,
   type StoredRequest,
 } from "./autoConfirm";
+import {
+  isSettled,
+  markCashOutHandled,
+  queueCashOut,
+  type CashOutStage,
+  type CashOutProgress,
+} from "./autoCashOut";
+import type { SendPhase } from "./telebirr";
 
 /**
  * The handset's live link to the server, shared by every screen.
@@ -34,8 +42,9 @@ import {
  *
  * Neither kind carries a verified figure: the server never sees the telebirr
  * payment, so a deposit is only the reference the customer typed, and a
- * withdrawal only the amount they asked for. The agent settles both against
- * their own telebirr account.
+ * withdrawal only the amount they asked for. The phone settles both against the
+ * agent's own telebirr account — reading it for a deposit, and sending out of it
+ * for a cash-out.
  */
 export type CustomerRequest = {
   /** Stable key — the same reference or amount can arrive more than once. */
@@ -51,8 +60,21 @@ export type CustomerRequest = {
       stage: ConfirmStage;
       amount?: number;
       reason?: string;
+      /** Receipts opened so far, when the list carried no reference numbers. */
+      opened?: number;
     }
-  | { kind: "withdrawal"; amount: number; phone: string }
+  | {
+      kind: "withdrawal";
+      amount: number;
+      phone: string;
+      /** The server's row for this cash-out; what a report quotes. */
+      requestId: string;
+      /** How the automatic telebirr payout is going. */
+      stage: CashOutStage;
+      /** Which telebirr step it is on, while it is running. */
+      phase?: SendPhase;
+      reason?: string;
+    }
 );
 
 export type ConnectionState = "connecting" | "online" | "offline";
@@ -60,7 +82,7 @@ export type ConnectionState = "connecting" | "online" | "offline";
 /** What the socket puts on the wire; `id` and `read` are ours to add. */
 type CustomerRequestEvent = { at: number } & (
   | { kind: "deposit"; reference: string; requestId: string }
-  | { kind: "withdrawal"; amount: number; phone: string }
+  | { kind: "withdrawal"; amount: number; phone: string; requestId: string }
 );
 
 /** The server's record of how a check ended — authoritative over local state. */
@@ -119,6 +141,12 @@ interface RealtimeValue {
   markAllRead: () => void;
   dismiss: (id: string) => void;
   clear: () => void;
+  /**
+   * Approves one cash-out and starts the telebirr transfer. This is the only
+   * way a payout begins: real money leaves the agent's account, so it takes a
+   * deliberate call from the screen and never happens on the socket's arrival.
+   */
+  payOut: (id: string) => void;
 }
 
 const RealtimeContext = createContext<RealtimeValue>({
@@ -128,6 +156,7 @@ const RealtimeContext = createContext<RealtimeValue>({
   markAllRead: () => {},
   dismiss: () => {},
   clear: () => {},
+  payOut: () => {},
 });
 
 export function RealtimeProvider({ children }: { children: ReactNode }) {
@@ -140,7 +169,24 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     loadStored().then((stored) => {
-      setAlerts(stored);
+      // A cash-out that was mid-transfer when the app closed cannot be resumed,
+      // and it must not come back looking like it is still running. Whether the
+      // money left is genuinely unknown here — only telebirr knows — so it is
+      // marked interrupted rather than guessed either way, and marked handled so
+      // nothing can re-send it.
+      setAlerts(
+        stored.map((item) => {
+          if (item.kind !== "withdrawal" || isSettled(item.stage) || item.stage === "awaiting") {
+            return item;
+          }
+          markCashOutHandled(item.id);
+          return {
+            ...item,
+            stage: "interrupted" as const,
+            reason: "The app closed while this was sending — check telebirr before re-sending.",
+          };
+        }),
+      );
       setRestored(true);
     });
   }, []);
@@ -202,22 +248,50 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
 
     socket.on("customer:request", (event: CustomerRequestEvent) => {
       const key = event.kind === "deposit" ? event.reference : `${event.phone}-${event.amount}`;
+      const id =
+        event.kind === "deposit"
+          ? `deposit-${key}-${event.at}`
+          : `withdrawal-${key}-${event.at}`;
       const request: CustomerRequest =
         event.kind === "deposit"
-          ? { ...event, id: `deposit-${key}-${event.at}`, read: false, stage: "queued" }
-          : { ...event, id: `withdrawal-${key}-${event.at}`, read: false };
+          ? { ...event, id, read: false, stage: "queued" }
+          : { ...event, id, read: false, stage: "queued" };
 
       setAlerts((current) => [request, ...current].slice(0, MAX_ALERTS));
 
-      // A deposit answers itself: the phone opens telebirr, finds the receipt
-      // and reports the amount back, which is what makes the customer's page
-      // succeed. Withdrawals have nothing to look up — the agent pays out.
+      // Both kinds answer themselves, with no tap from the agent.
+      //
+      // A deposit opens telebirr, finds the receipt and reports the amount back,
+      // which is what makes the customer's page succeed.
+      //
+      // A cash-out opens telebirr and SENDS the amount to the customer's number.
+      // That is real money leaving the agent's float on the strength of a request
+      // that arrived over the socket, so the safeguards are the ones inside
+      // `queueCashOut`: an id is only ever run once per session, the number and
+      // amount are validated before telebirr is opened, and the telebirr lock
+      // serialises it behind whatever else is running.
       if (event.kind === "deposit") {
         queueLookup(event.requestId, event.reference, (progress) => {
           setAlerts((current) =>
             current.map((item) =>
               item.kind === "deposit" && item.requestId === progress.requestId
-                ? { ...item, stage: progress.stage, amount: progress.amount, reason: progress.reason }
+                ? {
+                    ...item,
+                    stage: progress.stage,
+                    amount: progress.amount,
+                    reason: progress.reason,
+                    opened: progress.opened ?? item.opened,
+                  }
+                : item,
+            ),
+          );
+        });
+      } else {
+        queueCashOut(id, event.phone, event.amount, (progress: CashOutProgress) => {
+          setAlerts((current) =>
+            current.map((item) =>
+              item.kind === "withdrawal" && item.id === progress.id
+                ? { ...item, stage: progress.stage, phase: progress.phase, reason: progress.reason }
                 : item,
             ),
           );
@@ -263,6 +337,32 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
 
   const clear = useCallback(() => setAlerts([]), []);
 
+  /**
+   * Runs the payout the agent just approved. Reads the request out of the list
+   * by id rather than taking an amount and a number from the caller, so the
+   * screen cannot approve one figure and send another.
+   */
+  const payOut = useCallback((id: string) => {
+    setAlerts((current) => {
+      const target = current.find((item) => item.id === id);
+      if (!target || target.kind !== "withdrawal" || target.stage !== "awaiting") return current;
+
+      queueCashOut(id, target.phone, target.amount, (progress: CashOutProgress) => {
+        setAlerts((latest) =>
+          latest.map((item) =>
+            item.kind === "withdrawal" && item.id === progress.id
+              ? { ...item, stage: progress.stage, phase: progress.phase, reason: progress.reason }
+              : item,
+          ),
+        );
+      });
+
+      return current.map((item) =>
+        item.id === id && item.kind === "withdrawal" ? { ...item, stage: "queued" } : item,
+      );
+    });
+  }, []);
+
   const value = useMemo<RealtimeValue>(
     () => ({
       alerts,
@@ -271,8 +371,9 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
       markAllRead,
       dismiss,
       clear,
+      payOut,
     }),
-    [alerts, state, markAllRead, dismiss, clear],
+    [alerts, state, markAllRead, dismiss, clear, payOut],
   );
 
   return <RealtimeContext.Provider value={value}>{children}</RealtimeContext.Provider>;

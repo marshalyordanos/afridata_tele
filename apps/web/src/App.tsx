@@ -19,11 +19,12 @@ const looksLikePhone = (value: string) => value.replace(/\D/g, "").length >= 9;
 /**
  * How long to wait for the agent's phone before giving up.
  *
- * It has to open telebirr, sign in, load the transaction history and search it,
- * so this is generous on purpose — the server drops the request at three
- * minutes and this stops a little before that.
+ * It has to open telebirr, sign in, load the transaction history and then open
+ * receipts one by one until the reference turns up — up to twenty of them. This
+ * is generous on purpose, and stops a little before the server drops the
+ * request so the customer sees a reason rather than silence.
  */
-const ANSWER_TIMEOUT_MS = 150_000;
+const ANSWER_TIMEOUT_MS = 240_000;
 
 export default function App() {
   const [tab, setTab] = useState<Tab>("deposit");

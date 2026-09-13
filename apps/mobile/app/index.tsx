@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  AppState,
   View,
   Text,
   ScrollView,
@@ -7,20 +8,12 @@ import {
   StyleSheet,
   Share,
   ActivityIndicator,
-  TextInput,
-  Alert,
 } from "react-native";
 import { useRouter, Redirect } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
 import { TELEBIRR, openKnownApp } from "../lib/apps";
-import {
-  syncTelebirr,
-  signInAndSend,
-  SEND_AMOUNT_BIRR,
-  SyncPhase,
-  SendPhase,
-} from "../lib/telebirr";
+import { syncTelebirr, SyncPhase, SendPhase } from "../lib/telebirr";
 import {
   loadSnapshot,
   saveSnapshot,
@@ -33,11 +26,13 @@ import {
   TelebirrSnapshot,
   EMPTY_SNAPSHOT,
 } from "../lib/telebirrData";
-import { C, R, CARD_SHADOW, TABULAR } from "../lib/theme";
+import { C, R, SP, T, SHADOW, TABULAR, HIT } from "../lib/theme";
 import { useAccessibility, ACCESS_OFF_MESSAGE } from "../lib/accessibility";
 import { useAgent } from "../lib/agent";
 import { useRealtime } from "../lib/realtime";
 import { withTelebirr } from "../lib/telebirrLock";
+import { ScreenHeader, HeaderButton, useScrolled } from "../components/ScreenHeader";
+import { Button, Card, IconTile, Notice, Pill, type Tone } from "../components/ui";
 
 interface Step {
   phase: SyncPhase | SendPhase;
@@ -54,13 +49,16 @@ const STEPS: Step[] = [
   { phase: "returning", label: "Back to AutoPilot", hook: "openApp" },
 ];
 
-/** The send, same idea — every step names the selector it drives. */
+/**
+ * The payout, same idea — every step names the selector it drives. Driven by a
+ * customer's cash-out request now rather than a button on this screen.
+ */
 const SEND_STEPS: Step[] = [
   { phase: "opening", label: "Opening telebirr", hook: TELEBIRR.packages[0] },
   { phase: "login", label: "Signing in", hook: "et_input · tv_input_*" },
   { phase: "menu", label: "Opening Send Money", hook: "by text" },
   { phase: "recipient", label: "Entering the number", hook: "et_input" },
-  { phase: "amount", label: `Entering ${SEND_AMOUNT_BIRR}.00`, hook: "et_input" },
+  { phase: "amount", label: "Entering the amount", hook: "et_input" },
   { phase: "confirm", label: "Confirming", hook: "by text" },
   { phase: "pin", label: "Authorising with PIN", hook: "tv_input_*" },
   { phase: "returning", label: "Back to AutoPilot", hook: "openApp" },
@@ -69,20 +67,18 @@ const SEND_STEPS: Step[] = [
 export default function TelebirrAccount() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  const { scrolled, onScroll } = useScrolled();
 
   const [snapshot, setSnapshot] = useState<TelebirrSnapshot>(EMPTY_SNAPSHOT);
   const [masked, setMasked] = useState(false);
   const [phase, setPhase] = useState<SyncPhase | null>(null);
   const [autoSync, setAutoSync] = useState(true);
-  const [sendPhase, setSendPhase] = useState<SendPhase | null>(null);
-  const [recipientDraft, setRecipientDraft] = useState("");
-  const [editingRecipient, setEditingRecipient] = useState(false);
   const [error, setError] = useState("");
   const access = useAccessibility();
   const { agent, loading: agentLoading } = useAgent();
   // Live requests from customers who picked this agent on the web page.
   // The list itself lives on the notifications screen; here it is just a badge.
-  const { unread, state: liveState } = useRealtime();
+  const { unread, state: liveState, alerts } = useRealtime();
   const alive = useRef(true);
   // Ref to the latest sync so the once-on-open effect can call it without
   // taking sync's changing dependencies as its own.
@@ -92,11 +88,27 @@ export default function TelebirrAccount() {
   useEffect(() => {
     loadSnapshot().then((loaded) => {
       setSnapshot(loaded);
-      setRecipientDraft(loaded.sendRecipientDigits);
     });
     return () => {
       alive.current = false;
     };
+  }, []);
+
+  // Re-read the saved snapshot whenever the app comes back to the front.
+  //
+  // Driving telebirr happens with this screen still mounted, so its state is
+  // whatever it was when the app went away — which after a send is a balance
+  // short by exactly the amount just paid out. The send writes the real figure
+  // to storage before handing the screen back; this is what puts it on screen,
+  // instead of a stale number that looks like money still there.
+  useEffect(() => {
+    const sub = AppState.addEventListener("change", (state) => {
+      if (state !== "active") return;
+      loadSnapshot().then((loaded) => {
+        if (alive.current) setSnapshot(loaded);
+      });
+    });
+    return () => sub.remove();
   }, []);
 
   // When the app opens, read telebirr once on its own so the balance and
@@ -116,7 +128,15 @@ export default function TelebirrAccount() {
   }, [autoSync, access.on]);
 
   const syncing = phase !== null && phase !== "done";
-  const sending = sendPhase !== null && sendPhase !== "done";
+  // The payout the phone is driving right now, if any. It is started from the
+  // notifications screen, so this screen only reports on it.
+  const cashOut = alerts.find(
+    (item) =>
+      item.kind === "withdrawal" && (item.stage === "queued" || item.stage === "sending"),
+  );
+  const payingOut = cashOut?.kind === "withdrawal" ? cashOut : null;
+  const sendPhase = payingOut?.phase ?? null;
+  const sending = payingOut !== null;
   const busy = syncing || sending;
   const steps = sending ? SEND_STEPS : STEPS;
   const activePhase: SyncPhase | SendPhase | null = sending ? sendPhase : phase;
@@ -163,57 +183,6 @@ export default function TelebirrAccount() {
   // Always call through this, so the auto-sync effect reaches the current sync.
   syncRef.current = sync;
 
-  const saveRecipient = useCallback(async () => {
-    const digits = recipientDraft.replace(/\D/g, "").slice(-9);
-    const next = { ...snapshot, sendRecipientDigits: digits };
-    setRecipientDraft(digits);
-    setSnapshot(next);
-    setEditingRecipient(false);
-    await saveSnapshot(next);
-  }, [recipientDraft, snapshot]);
-
-  const runSend = useCallback(async () => {
-    setError("");
-    setSendPhase("opening");
-    const result = await signInAndSend(
-      snapshot.sendRecipientDigits,
-      SEND_AMOUNT_BIRR,
-      (p) => alive.current && setSendPhase(p)
-    );
-    if (!alive.current) return;
-    setSendPhase(null);
-    if (result.ok) {
-      // The balance just moved, so read it back rather than trusting the old one.
-      syncRef.current();
-    } else {
-      setError(result.log.slice(-2).join(" · "));
-    }
-  }, [snapshot.sendRecipientDigits]);
-
-  // Real money leaves the account here, so the tap is confirmed first.
-  const sendOneBirr = useCallback(() => {
-    // Without the service the send would open telebirr and then stall on its
-    // first read, which looks like the app half-working. Refuse it here.
-    if (!access.on) {
-      setError(ACCESS_OFF_MESSAGE);
-      return;
-    }
-    const to = snapshot.sendRecipientDigits;
-    if (to.length < 9) {
-      setEditingRecipient(true);
-      setError("Add the number to send to first.");
-      return;
-    }
-    Alert.alert(
-      `Send ${SEND_AMOUNT_BIRR}.00 ETB?`,
-      `AutoPilot will sign in to telebirr and send ETB ${SEND_AMOUNT_BIRR}.00 to ${maskPhone(to)}.`,
-      [
-        { text: "Cancel", style: "cancel" },
-        { text: `Send ${SEND_AMOUNT_BIRR} br`, style: "destructive", onPress: runSend },
-      ]
-    );
-  }, [snapshot.sendRecipientDigits, runSend, access.on]);
-
   const openApp = useCallback(async () => {
     setError("");
     try {
@@ -236,575 +205,418 @@ export default function TelebirrAccount() {
   if (agentLoading) return <View style={s.screen} />;
   if (!agent) return <Redirect href="/enroll" />;
 
+  const liveTone: Tone =
+    liveState === "online" ? "green" : liveState === "connecting" ? "amber" : "red";
+  const liveLabel =
+    liveState === "online" ? "Live" : liveState === "connecting" ? "Linking" : "Offline";
+
   return (
-    <ScrollView style={s.screen} contentContainerStyle={{ paddingBottom: 28 }}>
-      <View style={{ height: insets.top }} />
-
-      {/* Header — this is the app's home, so there is nowhere to go back to. */}
-      <View style={s.header}>
-        <View style={{ flex: 1 }}>
-          <Text style={s.title} numberOfLines={1}>
-            telebirr
-          </Text>
-          <Text style={s.subtitle} numberOfLines={1}>
-            read by AutoPilot
-          </Text>
-        </View>
-        {/* The socket's state, not the enrolment's: an agent needs to know at a
-            glance whether a customer's check would actually reach this phone. */}
-        <View style={[s.badge, liveState !== "online" && s.badgeOff]}>
-          <View style={[s.badgeDot, liveState !== "online" && s.badgeDotOff]} />
-          <Text style={[s.badgeText, liveState !== "online" && s.badgeTextOff]}>
-            {liveState === "online" ? "live" : liveState === "connecting" ? "linking" : "offline"}
-          </Text>
-        </View>
-        <Pressable
-          style={[s.iconBtn, { marginLeft: 2 }]}
-          onPress={() => router.push("/notifications")}
-          hitSlop={6}
-        >
-          <Feather name="bell" size={19} color={unread > 0 ? C.accent : C.dim} />
-          {unread > 0 && (
-            <View style={s.badgeCount}>
-              <Text style={s.badgeCountText}>{unread > 9 ? "9+" : unread}</Text>
-            </View>
-          )}
-        </Pressable>
-        <Pressable
-          style={[s.iconBtn, { marginLeft: -8 }]}
-          onPress={() => router.push("/dashboard")}
-          hitSlop={6}
-        >
-          <Feather name="sliders" size={19} color={C.dim} />
-        </Pressable>
-        <Pressable
-          style={[s.iconBtn, { marginRight: -11 }]}
-          onPress={() => router.push("/settings")}
-          hitSlop={6}
-        >
-          <Feather name="settings" size={19} color={C.dim} />
-        </Pressable>
-      </View>
-
-      {/* Accessibility — first thing on the screen, because nothing below it can
-          run without the service. Full card while it is off, one slim line once
-          it is on, so the state is always visible without taking over. */}
-      {access.on ? (
-        <Pressable
-          style={({ pressed }) => [s.accessOk, pressed && s.pressed]}
-          onPress={() => router.push("/settings")}
-        >
-          <Feather name="shield" size={15} color={C.green} />
-          <Text style={s.accessOkText}>Accessibility on</Text>
-          <Text style={s.accessOkDim}>AutoPilot can drive telebirr</Text>
-          <Feather name="chevron-right" size={14} color="#9fbcab" />
-        </Pressable>
-      ) : (
-        <View style={s.accessCard}>
-          <View style={s.accessHead}>
-            <View style={s.accessTile}>
-              {access.state === "checking" || access.state === "starting" ? (
-                <ActivityIndicator size="small" color={C.amber} />
-              ) : (
-                <Feather name="shield-off" size={18} color={C.amber} />
-              )}
-            </View>
-            <View style={{ flex: 1, gap: 3 }}>
-              <Text style={s.accessTitle}>
-                {access.state === "starting"
-                  ? "Accessibility starting…"
-                  : access.state === "checking"
-                  ? "Checking accessibility…"
-                  : "Accessibility is off"}
-              </Text>
-              <Text style={s.accessDim}>
-                {access.state === "starting"
-                  ? "Android is connecting the service — one moment."
-                  : "Sync and send cannot read or tap telebirr without it."}
-              </Text>
-            </View>
+    <View style={s.screen}>
+      {/* Fixed, outside the scroller: the status bar keeps the header's own
+          background behind it however far the content below is scrolled. */}
+      <ScreenHeader
+        title="telebirr"
+        subtitle={agent.fullName}
+        scrolled={scrolled}
+        right={
+          <View style={s.headerRight}>
+            <Pill label={liveLabel} tone={liveTone} />
+            <HeaderButton
+              icon="bell"
+              badge={unread}
+              tint={unread > 0 ? C.accent : C.dim}
+              onPress={() => router.push("/notifications")}
+            />
+            <HeaderButton icon="settings" onPress={() => router.push("/settings")} />
           </View>
+        }
+      />
 
-          {access.state !== "starting" && (
-            <Pressable
-              style={({ pressed }) => [s.accessBtn, pressed && s.pressed]}
-              onPress={access.open}
-              disabled={access.state === "checking"}
-            >
-              <Feather name="unlock" size={15} color="#fff" />
-              <Text style={s.accessBtnText}>Turn on accessibility</Text>
-            </Pressable>
-          )}
-
-          {access.returnedWithoutAccess && (
-            <Text style={s.accessNote}>
-              Still off — the AutoPilot switch has to be turned on. This updates by itself.
-            </Text>
-          )}
-        </View>
-      )}
-
-      {/* Balance */}
-      <View style={s.card}>
-        <View style={s.balanceRow}>
-          <View style={{ gap: 10 }}>
-            <Text style={s.label}>Available balance</Text>
-            <View style={s.amountRow}>
-              <Text style={s.currency}>ETB</Text>
-              <Text style={s.balance}>
-                {masked
-                  ? "•• ••• ••"
-                  : snapshot.balance === null
-                  ? "—"
-                  : money(snapshot.balance)}
-              </Text>
-            </View>
-          </View>
+      <ScrollView
+        onScroll={onScroll}
+        scrollEventThrottle={16}
+        contentContainerStyle={{ paddingBottom: insets.bottom + SP.xxl }}
+        showsVerticalScrollIndicator={false}
+      >
+        {/* Accessibility first: nothing below it can run without the service.
+            A full card while it is off, one quiet line once it is on. */}
+        {access.on ? (
           <Pressable
-            style={[s.iconBtn, { marginTop: -12, marginRight: -12 }]}
-            onPress={() => setMasked((m) => !m)}
-            hitSlop={6}
+            style={({ pressed }) => [s.accessOk, pressed && s.pressedRow]}
+            onPress={() => router.push("/settings")}
           >
-            <Feather name={masked ? "eye-off" : "eye"} size={21} color={C.dim} />
-          </Pressable>
-        </View>
-
-        <View style={s.accountRow}>
-          <Text style={s.phone}>{maskPhone(agent.phoneNationalDigits)}</Text>
-          <View style={s.dot} />
-          <Text style={s.dim}>{agent.fullName}</Text>
-        </View>
-
-        <View style={s.divider} />
-
-        <View style={s.syncRow}>
-          <View style={{ flex: 1, gap: 3 }}>
-            <Text style={s.syncTitle}>
-              {syncing ? "Reading telebirr…" : `Last read ${relativeTime(snapshot.readAt)}`}
+            <Feather name="shield" size={14} color={C.green} />
+            <Text style={s.accessOkText}>Accessibility on</Text>
+            <Text style={s.accessOkDim} numberOfLines={1}>
+              AutoPilot can drive telebirr
             </Text>
-            <Text style={s.dim}>{syncing ? "Keep the screen on" : "Balance and receipts"}</Text>
-          </View>
-
-          <Pressable
-            style={({ pressed }) => [s.primaryBtn, pressed && s.pressed]}
-            onPress={sync}
-            disabled={busy}
-          >
-            {syncing ? (
-              <ActivityIndicator size="small" color="#fff" />
-            ) : (
-              <Feather name="refresh-cw" size={15} color="#fff" />
-            )}
-            <Text style={s.primaryBtnText}>{syncing ? "Reading" : "Sync now"}</Text>
+            <Feather name="chevron-right" size={15} color={C.green} />
           </Pressable>
-        </View>
-
-        <View style={s.divider} />
-
-        {/* One tap: sign in and send. The number it goes to lives here. */}
-        <View style={s.sendRow}>
-          <Feather name="send" size={14} color={C.dim} />
-          <Text style={s.dim}>To</Text>
-          {editingRecipient || !snapshot.sendRecipientDigits ? (
-            <>
-              <Text style={s.phone}>+251</Text>
-              <TextInput
-                style={s.recipientInput}
-                value={recipientDraft}
-                onChangeText={setRecipientDraft}
-                onBlur={saveRecipient}
-                onSubmitEditing={saveRecipient}
-                placeholder="9XXXXXXXX"
-                placeholderTextColor={C.faint}
-                keyboardType="number-pad"
-                maxLength={9}
-                returnKeyType="done"
-                autoFocus={editingRecipient}
+        ) : (
+          <Card style={s.accessCard}>
+            <View style={s.rowCentre}>
+              <IconTile
+                icon="shield-off"
+                tone="amber"
+                size={42}
+                busy={access.state === "checking" || access.state === "starting"}
               />
-              <Pressable onPress={saveRecipient} hitSlop={8}>
-                <Text style={s.smallLink}>save</Text>
-              </Pressable>
-            </>
-          ) : (
-            <>
-              <Text style={[s.phone, { flex: 1 }]}>
-                {maskPhone(snapshot.sendRecipientDigits)}
-              </Text>
-              <Pressable onPress={() => setEditingRecipient(true)} hitSlop={8}>
-                <Text style={s.smallLink}>change</Text>
-              </Pressable>
-            </>
-          )}
-        </View>
-
-        <Pressable
-          style={({ pressed }) => [s.sendBtn, pressed && s.pressed]}
-          onPress={sendOneBirr}
-          disabled={busy}
-        >
-          {sending ? (
-            <ActivityIndicator size="small" color={C.accent} />
-          ) : (
-            <Feather name="send" size={15} color={C.accent} />
-          )}
-          <Text style={s.sendBtnText}>
-            {sending ? "Sending…" : `Sign in & send ${SEND_AMOUNT_BIRR} br`}
-          </Text>
-        </Pressable>
-      </View>
-
-      {/* Progress while reading, quick actions when idle */}
-      {busy ? (
-        <View style={[s.card, s.progressCard]}>
-          {steps.map((step, i) => {
-            const done = i < doneIndex;
-            const active = i === stepIndex;
-            return (
-              <View key={step.phase} style={s.stepRow}>
-                <View
-                  style={[
-                    s.stepDot,
-                    {
-                      borderColor: done || active ? C.accent : C.border,
-                      backgroundColor: done ? C.accent : C.surface,
-                    },
-                  ]}
-                />
-                <Text
-                  style={[s.stepLabel, { color: done || active ? C.text : C.faint }]}
-                  numberOfLines={1}
-                >
-                  {step.label}
+              <View style={{ flex: 1, gap: 3 }}>
+                <Text style={s.accessTitle}>
+                  {access.state === "starting"
+                    ? "Accessibility starting…"
+                    : access.state === "checking"
+                    ? "Checking accessibility…"
+                    : "Accessibility is off"}
                 </Text>
-                <Text style={s.stepHook} numberOfLines={1}>
-                  {done ? step.hook : ""}
+                <Text style={s.accessDim}>
+                  {access.state === "starting"
+                    ? "Android is connecting the service — one moment."
+                    : "Nothing can read or tap telebirr without it."}
                 </Text>
               </View>
-            );
-          })}
-          <View style={s.hintRow}>
-            <Feather name="alert-circle" size={15} color={C.amber} />
-            <Text style={s.hint}>
-              telebirr refuses to sign in over Wi-Fi — AutoPilot needs mobile data.
+            </View>
+            {access.state !== "starting" && (
+              <Button
+                label="Turn on accessibility"
+                icon="unlock"
+                onPress={access.open}
+                disabled={access.state === "checking"}
+                full
+              />
+            )}
+            {access.returnedWithoutAccess && (
+              <Text style={s.accessNote}>
+                Still off — the AutoPilot switch has to be turned on. This updates by itself.
+              </Text>
+            )}
+          </Card>
+        )}
+
+        {/* The balance. The one inverted surface in the app: it is what the
+            agent opens the app to read, so nothing else competes with it. */}
+        <View style={s.panel}>
+          <View style={s.panelTop}>
+            <View style={{ gap: SP.md, flex: 1 }}>
+              <Text style={s.panelLabel}>Available balance</Text>
+              <View style={s.amountRow}>
+                <Text style={s.currency}>ETB</Text>
+                <Text style={s.balance} numberOfLines={1}>
+                  {masked ? "•• •••" : snapshot.balance === null ? "—" : money(snapshot.balance)}
+                </Text>
+              </View>
+            </View>
+            <Pressable
+              style={({ pressed }) => [s.panelIconBtn, pressed && { opacity: 0.6 }]}
+              onPress={() => setMasked((m) => !m)}
+              hitSlop={HIT}
+            >
+              <Feather name={masked ? "eye-off" : "eye"} size={19} color={C.onPanelDim} />
+            </Pressable>
+          </View>
+
+          <View style={s.accountRow}>
+            <Text style={s.panelPhone}>{maskPhone(agent.phoneNationalDigits)}</Text>
+            <View style={s.panelDot} />
+            <Text style={s.panelDim} numberOfLines={1}>
+              {agent.businessName ?? "telebirr agent"}
             </Text>
           </View>
-        </View>
-      ) : (
-        <View style={s.actions}>
-          <Pressable style={({ pressed }) => [s.action, pressed && s.pressed]} onPress={openApp}>
-            <Feather name="smartphone" size={20} color={C.accent} />
-            <Text style={s.actionText}>Open app</Text>
-          </Pressable>
-          <Pressable style={({ pressed }) => [s.action, pressed && s.pressed]} onPress={exportCsv}>
-            <Feather name="download" size={20} color={C.accent} />
-            <Text style={s.actionText}>Export CSV</Text>
-          </Pressable>
-          <Pressable
-            style={({ pressed }) => [
-              s.action,
-              autoSync && { backgroundColor: C.accentSoft, borderColor: "#bfd2ff" },
-              pressed && s.pressed,
-            ]}
-            onPress={() => setAutoSync((a) => !a)}
-          >
-            <Feather name="repeat" size={20} color={autoSync ? C.accent : C.dim} />
-            <Text style={[s.actionText, { color: autoSync ? C.accent : C.dim }]}>
-              {autoSync ? "Auto · on" : "Auto · off"}
-            </Text>
-          </Pressable>
-        </View>
-      )}
 
-      {!!error && (
-        <View style={s.errorBox}>
-          <Feather name="alert-triangle" size={15} color={C.red} />
-          <Text style={s.errorText}>{error}</Text>
-        </View>
-      )}
+          <View style={s.panelDivider} />
 
-      {/* Recent activity */}
-      <View style={s.sectionHeader}>
-        <Text style={s.sectionTitle}>Recent activity</Text>
-        <Pressable onPress={() => router.push("/transactions")} hitSlop={8}>
-          <Text style={s.link}>View all</Text>
-        </Pressable>
-      </View>
-
-      <View style={{ gap: 8, marginHorizontal: 20 }}>
-        {recent.map((tx) => {
-          const incoming = tx.value > 0;
-          return (
-            <Pressable
-              key={tx.id}
-              style={({ pressed }) => [s.txRow, pressed && s.pressed]}
-              onPress={() => router.push(`/transaction/${tx.id}`)}
-            >
-              <View style={[s.txIcon, { backgroundColor: incoming ? C.greenSoft : C.redSoft }]}>
-                <Feather
-                  name={incoming ? "arrow-down-left" : "arrow-up-right"}
-                  size={18}
-                  color={incoming ? C.green : C.red}
-                />
-              </View>
-              <View style={{ flex: 1, gap: 3 }}>
-                <Text style={s.txName} numberOfLines={1}>
-                  {tx.name}
-                </Text>
-                <Text style={s.dim}>{txMeta(tx)}</Text>
-              </View>
-              <Text style={[s.txAmount, { color: incoming ? C.green : C.text }]}>
-                {signedMoney(tx.value)}
+          <View style={s.rowCentre}>
+            <View style={{ flex: 1, gap: 3 }}>
+              <Text style={s.panelSyncTitle}>
+                {sending
+                  ? "Paying out a cash-out…"
+                  : syncing
+                  ? "Reading telebirr…"
+                  : `Last read ${relativeTime(snapshot.readAt)}`}
               </Text>
-              <Feather name="chevron-right" size={14} color="#aab5c9" />
+              <Text style={s.panelDim}>
+                {busy ? "Keep the screen on" : "Balance and receipts"}
+              </Text>
+            </View>
+            <Button
+              label={syncing ? "Reading" : "Sync"}
+              icon="refresh-cw"
+              onPress={sync}
+              busy={syncing}
+              disabled={busy}
+            />
+          </View>
+        </View>
+
+        {/* What the phone is doing right now, or what you can ask it to do. */}
+        {busy ? (
+          <Card style={{ marginTop: SP.md, gap: SP.md }}>
+            {/* A payout is money leaving on a customer's request, so it says so
+                plainly — the step list alone would look like an ordinary read. */}
+            {payingOut && (
+              <View style={s.payingRow}>
+                <IconTile icon="arrow-up-right" tone="red" size={34} />
+                <View style={{ flex: 1, gap: 2 }}>
+                  <Text style={s.payingText}>Sending ETB {money(payingOut.amount)}</Text>
+                  <Text style={s.dim}>to {payingOut.phone}</Text>
+                </View>
+              </View>
+            )}
+            <View style={{ gap: SP.md }}>
+              {steps.map((step, i) => {
+                const done = i < doneIndex;
+                const active = i === stepIndex;
+                return (
+                  <View key={step.phase} style={s.stepRow}>
+                    <View
+                      style={[
+                        s.stepDot,
+                        (done || active) && { borderColor: C.accent },
+                        done && { backgroundColor: C.accent },
+                      ]}
+                    >
+                      {done && <Feather name="check" size={9} color="#fff" />}
+                    </View>
+                    <Text
+                      style={[s.stepLabel, { color: done || active ? C.text : C.faint }]}
+                      numberOfLines={1}
+                    >
+                      {step.label}
+                    </Text>
+                    {active && <ActivityIndicator size="small" color={C.accent} />}
+                  </View>
+                );
+              })}
+            </View>
+            <Notice
+              tone="amber"
+              icon="wifi"
+              text="telebirr refuses to sign in over Wi-Fi — AutoPilot needs mobile data."
+            />
+          </Card>
+        ) : (
+          <View style={s.actions}>
+            <QuickAction icon="smartphone" label="Open app" onPress={openApp} />
+            <QuickAction icon="download" label="Export CSV" onPress={exportCsv} />
+            <QuickAction
+              icon="repeat"
+              label={autoSync ? "Auto · on" : "Auto · off"}
+              active={autoSync}
+              onPress={() => setAutoSync((a) => !a)}
+            />
+          </View>
+        )}
+
+        {!!error && (
+          <View style={{ marginHorizontal: SP.gutter, marginTop: SP.md }}>
+            <Notice tone="red" text={error} />
+          </View>
+        )}
+
+        {/* Recent activity */}
+        <View style={s.sectionHeader}>
+          <Text style={s.sectionTitle}>Recent activity</Text>
+          {recent.length > 0 && (
+            <Pressable onPress={() => router.push("/transactions")} hitSlop={HIT}>
+              <Text style={s.link}>View all</Text>
             </Pressable>
-          );
-        })}
-      </View>
-    </ScrollView>
+          )}
+        </View>
+
+        {recent.length === 0 ? (
+          <Card style={{ alignItems: "center", paddingVertical: SP.xxl, gap: SP.sm }}>
+            <IconTile icon="inbox" tone="neutral" size={46} />
+            <Text style={s.emptyTitle}>No receipts yet</Text>
+            <Text style={s.emptyBody}>Sync to read your telebirr history onto this phone.</Text>
+          </Card>
+        ) : (
+          <View style={{ gap: SP.sm, marginHorizontal: SP.gutter }}>
+            {recent.map((tx) => {
+              const incoming = tx.value > 0;
+              return (
+                <Pressable
+                  key={tx.id}
+                  style={({ pressed }) => [s.txRow, pressed && s.pressedRow]}
+                  onPress={() => router.push(`/transaction/${tx.id}`)}
+                >
+                  <IconTile
+                    icon={incoming ? "arrow-down-left" : "arrow-up-right"}
+                    tone={incoming ? "green" : "red"}
+                    size={38}
+                  />
+                  <View style={{ flex: 1, gap: 2 }}>
+                    <Text style={s.txName} numberOfLines={1}>
+                      {tx.name}
+                    </Text>
+                    <Text style={s.dim} numberOfLines={1}>
+                      {txMeta(tx)}
+                    </Text>
+                  </View>
+                  <Text style={[s.txAmount, { color: incoming ? C.green : C.text }]}>
+                    {signedMoney(tx.value)}
+                  </Text>
+                  <Feather name="chevron-right" size={15} color={C.faint} />
+                </Pressable>
+              );
+            })}
+          </View>
+        )}
+      </ScrollView>
+    </View>
+  );
+}
+
+/** One of the three squares under the balance. */
+function QuickAction({
+  icon,
+  label,
+  onPress,
+  active = false,
+}: {
+  icon: keyof typeof Feather.glyphMap;
+  label: string;
+  onPress: () => void;
+  active?: boolean;
+}) {
+  return (
+    <Pressable
+      style={({ pressed }) => [s.action, active && s.actionActive, pressed && s.pressedRow]}
+      onPress={onPress}
+    >
+      <Feather name={icon} size={19} color={active ? C.accent : C.dim} />
+      <Text style={[s.actionText, active && { color: C.accent }]} numberOfLines={1}>
+        {label}
+      </Text>
+    </Pressable>
   );
 }
 
 const s = StyleSheet.create({
   screen: { flex: 1, backgroundColor: C.ground },
-  header: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-    paddingHorizontal: 20,
-    paddingTop: 8,
-    paddingBottom: 14,
-  },
-  iconBtn: {
-    width: 44,
-    height: 44,
-    marginLeft: -13,
-    alignItems: "center",
-    justifyContent: "center",
-    borderRadius: R.row,
-  },
-  title: { fontSize: 19, fontWeight: "600", color: C.text, letterSpacing: -0.3 },
-  subtitle: { fontSize: 12, color: C.dim, marginTop: 1 },
-  badge: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    height: 28,
-    paddingHorizontal: 11,
-    borderRadius: R.pill,
-    backgroundColor: C.greenSoft,
-  },
-  badgeDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: C.green },
-  badgeText: { fontSize: 12, fontWeight: "600", color: C.green },
-  badgeOff: { backgroundColor: C.surfaceAlt },
-  badgeDotOff: { backgroundColor: C.faint },
-  badgeTextOff: { color: C.faint },
+  headerRight: { flexDirection: "row", alignItems: "center", gap: 2, marginRight: -8 },
+  rowCentre: { flexDirection: "row", alignItems: "center", gap: SP.md },
+  dim: { ...T.small, color: C.dim },
+  pressedRow: { opacity: 0.7 },
 
+  // --- accessibility ---
   accessOk: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 8,
-    marginHorizontal: 20,
-    marginBottom: 12,
-    paddingVertical: 10,
-    paddingHorizontal: 12,
+    gap: SP.sm,
+    marginHorizontal: SP.gutter,
+    marginBottom: SP.md,
+    paddingVertical: 9,
+    paddingHorizontal: SP.md,
     borderRadius: R.row,
     backgroundColor: C.greenSoft,
   },
-  accessOkText: { fontSize: 12, fontWeight: "600", color: C.green },
-  accessOkDim: { flex: 1, fontSize: 12, color: "#3f8361" },
+  accessOkText: { ...T.small, fontWeight: "700", color: C.green },
+  accessOkDim: { flex: 1, ...T.micro, color: C.green, opacity: 0.75 },
+  accessCard: { marginBottom: SP.md, backgroundColor: C.amberSoft, borderColor: "#f0dcb4" },
+  accessTitle: { ...T.body, fontWeight: "700", color: "#6d4d11" },
+  accessDim: { ...T.small, color: C.amber, lineHeight: 18 },
+  accessNote: { ...T.micro, color: C.amber, lineHeight: 16 },
 
-  accessCard: {
-    marginHorizontal: 20,
-    marginBottom: 12,
-    padding: 14,
-    gap: 12,
+  // --- balance panel ---
+  panel: {
+    marginHorizontal: SP.gutter,
+    padding: SP.xl,
+    gap: SP.lg,
     borderRadius: R.card,
-    backgroundColor: C.amberSoft,
-    borderWidth: 1,
-    borderColor: "#f0dcb4",
+    backgroundColor: C.panel,
+    ...SHADOW.raised,
   },
-  accessHead: { flexDirection: "row", alignItems: "center", gap: 11 },
-  accessTile: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
+  panelTop: { flexDirection: "row", alignItems: "flex-start" },
+  panelLabel: { ...T.label, color: C.onPanelDim },
+  amountRow: { flexDirection: "row", alignItems: "baseline", gap: SP.sm },
+  currency: { fontSize: 15, fontWeight: "600", color: C.onPanelDim },
+  balance: { ...T.display, color: C.onPanel, ...TABULAR, flexShrink: 1 },
+  panelIconBtn: {
+    width: 38,
+    height: 38,
+    marginTop: -6,
+    marginRight: -8,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#f8e8c9",
+    borderRadius: R.pill,
   },
-  accessTitle: { fontSize: 14, fontWeight: "600", color: "#6d4d11" },
-  accessDim: { fontSize: 12, color: C.amber, lineHeight: 17 },
-  accessBtn: {
+  accountRow: { flexDirection: "row", alignItems: "center", gap: SP.sm },
+  panelPhone: { ...T.mono, color: C.onPanel },
+  panelDot: { width: 3, height: 3, borderRadius: 2, backgroundColor: C.onPanelDim },
+  panelDim: { ...T.small, color: C.onPanelDim, flexShrink: 1 },
+  panelDivider: { height: 1, backgroundColor: C.panelBorder },
+  panelSyncTitle: { ...T.body, fontWeight: "600", color: C.onPanel },
+
+  // --- progress ---
+  payingRow: {
     flexDirection: "row",
     alignItems: "center",
-    justifyContent: "center",
-    gap: 8,
-    height: 42,
-    borderRadius: R.btn,
-    backgroundColor: C.accent,
+    gap: SP.md,
+    paddingBottom: SP.md,
+    borderBottomWidth: 1,
+    borderBottomColor: C.divider,
   },
-  accessBtnText: { fontSize: 13, fontWeight: "600", color: "#fff" },
-
-  // Unread count on the bell. Absolute so it rides the icon's top-right corner
-  // without changing the header's layout when it appears and disappears.
-  badgeCount: {
-    position: "absolute",
-    top: 6,
-    right: 5,
-    minWidth: 17,
-    height: 17,
-    paddingHorizontal: 4,
-    borderRadius: 9,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: C.red,
-    borderWidth: 2,
-    borderColor: C.ground,
-  },
-  badgeCountText: { fontSize: 10, fontWeight: "700", color: "#fff", ...TABULAR },
-  accessNote: { fontSize: 11, color: C.amber, lineHeight: 16 },
-
-  card: {
-    marginHorizontal: 20,
-    backgroundColor: C.surface,
-    borderWidth: 1,
-    borderColor: C.border,
-    borderRadius: R.card,
-    padding: 20,
-    gap: 16,
-    ...CARD_SHADOW,
-  },
-  balanceRow: { flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between" },
-  label: {
-    fontSize: 11,
-    fontWeight: "600",
-    letterSpacing: 0.9,
-    textTransform: "uppercase",
-    color: C.dim,
-  },
-  amountRow: { flexDirection: "row", alignItems: "baseline", gap: 8 },
-  currency: { fontSize: 15, fontWeight: "600", color: C.dim },
-  balance: { fontSize: 34, fontWeight: "600", color: C.text, letterSpacing: -0.8, ...TABULAR },
-  accountRow: { flexDirection: "row", alignItems: "center", gap: 8 },
-  phone: { fontSize: 13, color: C.text, fontFamily: "monospace" },
-  dot: { width: 3, height: 3, borderRadius: 2, backgroundColor: C.borderStrong },
-  dim: { fontSize: 12, color: C.dim },
-  divider: { height: 1, backgroundColor: C.divider },
-  syncRow: { flexDirection: "row", alignItems: "center", gap: 8 },
-  syncTitle: { fontSize: 13, fontWeight: "500", color: C.text },
-
-  smallBtn: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 5,
-    height: 34,
-    paddingHorizontal: 11,
-    borderRadius: R.btn,
-    borderWidth: 1,
-    borderColor: C.border,
-    backgroundColor: C.surfaceAlt,
-  },
-  smallBtnText: { fontSize: 12, fontWeight: "600", color: C.dim },
-  smallLink: { fontSize: 12, fontWeight: "600", color: C.accent },
-  sendRow: { flexDirection: "row", alignItems: "center", gap: 8 },
-  recipientInput: {
-    flex: 1,
-    height: 34,
-    paddingHorizontal: 8,
+  payingText: { ...T.body, fontWeight: "700", color: C.text },
+  stepRow: { flexDirection: "row", alignItems: "center", gap: SP.md },
+  stepDot: {
+    width: 16,
+    height: 16,
     borderRadius: 8,
-    borderWidth: 1,
+    borderWidth: 2,
     borderColor: C.border,
-    backgroundColor: C.surfaceAlt,
-    color: C.text,
-    fontSize: 13,
-    fontFamily: "monospace",
-  },
-  sendBtn: {
-    flexDirection: "row",
+    backgroundColor: C.surface,
     alignItems: "center",
     justifyContent: "center",
-    gap: 8,
-    height: 40,
-    borderRadius: R.btn,
-    backgroundColor: C.accentSoft,
-    borderWidth: 1,
-    borderColor: "#bfd2ff",
   },
-  sendBtnText: { fontSize: 13, fontWeight: "600", color: C.accent },
-  primaryBtn: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    height: 44,
-    paddingHorizontal: 16,
-    borderRadius: R.btn,
-    backgroundColor: C.accent,
-  },
-  primaryBtnText: { fontSize: 14, fontWeight: "600", color: "#fff" },
-  pressed: { opacity: 0.75 },
+  stepLabel: { flex: 1, ...T.small, fontWeight: "600" },
 
-  progressCard: { marginTop: 14, padding: 16, gap: 12 },
-  stepRow: { flexDirection: "row", alignItems: "center", gap: 10 },
-  stepDot: { width: 14, height: 14, borderRadius: 7, borderWidth: 2 },
-  stepLabel: { flex: 1, fontSize: 13, fontWeight: "500" },
-  stepHook: { fontSize: 11, color: C.faint, fontFamily: "monospace" },
-  hintRow: {
+  // --- quick actions ---
+  actions: {
     flexDirection: "row",
-    gap: 8,
-    borderTopWidth: 1,
-    borderTopColor: C.divider,
-    paddingTop: 12,
+    gap: SP.sm,
+    marginHorizontal: SP.gutter,
+    marginTop: SP.md,
   },
-  hint: { flex: 1, fontSize: 12, color: C.amber, lineHeight: 17 },
-
-  actions: { flexDirection: "row", gap: 10, marginHorizontal: 20, marginTop: 14 },
   action: {
     flex: 1,
-    height: 86,
+    height: 78,
     alignItems: "center",
     justifyContent: "center",
-    gap: 9,
+    gap: SP.sm,
     backgroundColor: C.surface,
     borderWidth: 1,
     borderColor: C.border,
     borderRadius: R.card,
+    ...SHADOW.card,
   },
-  actionText: { fontSize: 12, fontWeight: "500", color: C.text },
+  actionActive: { backgroundColor: C.accentSoft, borderColor: C.accentBorder },
+  actionText: { ...T.micro, fontWeight: "600", color: C.text },
 
-  errorBox: {
-    flexDirection: "row",
-    gap: 8,
-    marginHorizontal: 20,
-    marginTop: 14,
-    padding: 12,
-    borderRadius: R.row,
-    backgroundColor: C.redSoft,
-  },
-  errorText: { flex: 1, fontSize: 12, color: C.red, lineHeight: 17 },
-
+  // --- recent activity ---
   sectionHeader: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    paddingHorizontal: 20,
-    paddingTop: 24,
-    paddingBottom: 12,
+    paddingHorizontal: SP.gutter,
+    paddingTop: SP.xxl,
+    paddingBottom: SP.md,
   },
-  sectionTitle: { fontSize: 15, fontWeight: "600", color: C.text, letterSpacing: -0.2 },
-  link: { fontSize: 13, fontWeight: "600", color: C.accent },
+  sectionTitle: { ...T.heading, color: C.text },
+  link: { ...T.small, fontWeight: "700", color: C.accent },
+  emptyTitle: { ...T.body, fontWeight: "700", color: C.text },
+  emptyBody: { ...T.small, color: C.dim, textAlign: "center" },
 
   txRow: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 12,
+    gap: SP.md,
     backgroundColor: C.surface,
     borderWidth: 1,
     borderColor: C.border,
     borderRadius: R.row,
-    paddingVertical: 12,
-    paddingHorizontal: 14,
+    paddingVertical: SP.md,
+    paddingHorizontal: SP.md,
   },
-  txIcon: { width: 38, height: 38, borderRadius: 19, alignItems: "center", justifyContent: "center" },
-  txName: { fontSize: 14, fontWeight: "500", color: C.text },
-  txAmount: { fontSize: 14, fontWeight: "600", ...TABULAR },
+  txName: { ...T.body, fontWeight: "600", color: C.text },
+  txAmount: { ...T.body, fontWeight: "700", ...TABULAR },
 });

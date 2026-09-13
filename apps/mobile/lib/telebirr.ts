@@ -1,10 +1,12 @@
 import { Dimensions, PixelRatio } from "react-native";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import Constants from "expo-constants";
 import AutoAccessibility, { ScrapedNode } from "auto-accessibility";
 import type { Macro, Step } from "./macros";
 import type { TelebirrTransaction } from "./telebirrData";
 import { TELEBIRR, openKnownApp } from "./apps";
 import { requireAccessibility } from "./accessibility";
+import { TX_AMOUNT, matchMoment, parseTransactions } from "./telebirrParse";
 import { requireAgent } from "./agent";
 
 /**
@@ -252,7 +254,23 @@ const AMOUNT = /([0-9][0-9,]*\.[0-9]{2})/;
  * screen hides it by default (see BALANCE_EYE), and no amount is on screen
  * until the eye is tapped.
  */
-export function parseBalance(nodes: { text: string; description: string }[]): number | null {
+// The list parser lives in ./telebirrParse: pure text handling, no native
+// modules, so it can be run against a captured accessibility tree off-device.
+export { parseTransactions };
+
+export function parseBalance(
+  nodes: { text: string; description: string }[],
+  /**
+   * Refuse the last-resort guess below.
+   *
+   * That fallback takes the first amount ANYWHERE on screen, which is only
+   * sensible on a screen already known to be home. Off home it is actively
+   * dangerous: telebirr's transfer-success screen carries no "Balance" label,
+   * so the first amount on it is the sum just sent — and saving that as the
+   * balance tells the agent they hold exactly what they just paid away.
+   */
+  options: { strict?: boolean } = {}
+): number | null {
   const texts = nodes.map((n) => (n.text || n.description || "").trim()).filter(Boolean);
   // Target the MAIN balance only. telebirr's home also shows "Endekise (ETB)"
   // and "Reward (ETB)", each separately masked, so the amount is read from the
@@ -268,6 +286,8 @@ export function parseBalance(nodes: { text: string; description: string }[]): nu
     // report it as unread so the caller taps the eye and reads again.
     return null;
   }
+  if (options.strict) return null;
+
   // No labelled balance at all — first amount anywhere, as a last resort.
   for (const text of texts) {
     const match = text.match(AMOUNT);
@@ -279,78 +299,6 @@ export function parseBalance(nodes: { text: string; description: string }[]): nu
 /** True while the home screen is still hiding the balance behind asterisks. */
 export function balanceIsMasked(nodes: { text: string; description: string }[]): boolean {
   return nodes.some((n) => /^\*{3,}$/.test((n.text || n.description || "").trim()));
-}
-
-/** "DD-MM-YYYY HH:MM" as telebirr's Transaction History prints each row's time. */
-const TX_DATETIME = /^(\d{2})-(\d{2})-(\d{4})\s+(\d{2}:\d{2})$/;
-/** "+500.00" / "-1.00" — the signed amount node that follows the date. */
-const TX_AMOUNT = /^([+-])\s*([0-9][0-9,]*\.[0-9]{2})$/;
-
-/** A short category from telebirr's transaction label, for the coloured chip. */
-function deriveKind(name: string): string {
-  const n = name.toLowerCase();
-  if (n.includes("cash in")) return "Cash In";
-  if (n.includes("cash out") || n.includes("withdraw")) return "Withdrawal";
-  if (n.includes("transfer")) return "Transfer";
-  if (n.includes("package")) return "Package";
-  if (n.includes("merchant")) return "Merchant";
-  if (n.includes("bill")) return "Bill";
-  if (n.includes("airtime")) return "Airtime";
-  if (n.includes("receive")) return "Received";
-  return name;
-}
-
-/**
- * Transactions out of telebirr's "Transaction History" mini-app screen.
- *
- * Verified live against the macle mini-program (SingleProcessActivity). Its
- * rows come through the accessibility tree in document order as four
- * consecutive text nodes — name, "DD-MM-YYYY HH:MM", signed amount, "ETB" —
- * with month headers ("September", "August") and the Pay/Income/Total summary
- * interleaved. Anchoring on the date node is what keeps the summary figures
- * (which have no date) out of the list.
- *
- * The list screen shows no receipt id, fee or running balance — those live on
- * each receipt's own detail screen — so those fields are left blank here and
- * filled in when a row is opened.
- */
-export function parseTransactions(
-  nodes: { text: string; description: string }[]
-): TelebirrTransaction[] {
-  const texts = nodes.map((n) => (n.text || n.description || "").trim());
-  const out: TelebirrTransaction[] = [];
-  for (let i = 0; i < texts.length; i++) {
-    const when = texts[i].match(TX_DATETIME);
-    if (!when) continue;
-    // The amount is the next signed node within a step or two of the date.
-    let value: number | null = null;
-    for (let j = i + 1; j < Math.min(i + 3, texts.length); j++) {
-      const amt = texts[j].match(TX_AMOUNT);
-      if (amt) {
-        value = Number(amt[2].replace(/,/g, "")) * (amt[1] === "-" ? -1 : 1);
-        break;
-      }
-    }
-    if (value === null) continue;
-    // The label sits just before the date; guard against a month/summary node.
-    const label = texts[i - 1] ?? "";
-    const name = label && !/\(ETB\)$/.test(label) ? label : "Transaction";
-    const [, dd, mm, yyyy, hhmm] = when;
-    const date = `${dd}-${mm}-${yyyy}`;
-    out.push({
-      id: `${date}_${hhmm}_${value}_${out.length}`,
-      day: date,
-      time: hhmm,
-      kind: deriveKind(name),
-      name,
-      value,
-      receipt: "",
-      charge: "",
-      balanceAfter: "",
-      status: "",
-    });
-  }
-  return out;
 }
 
 /**
@@ -371,6 +319,14 @@ async function tapFraction(fx: number, fy: number): Promise<void> {
 }
 
 /** A short upward swipe, to bring below-the-fold home tiles into view. */
+/** The opposite, to get back to the top of a list that has been scrolled. */
+async function swipeDown(): Promise<void> {
+  const screen = Dimensions.get("screen");
+  const px = (v: number) => PixelRatio.getPixelSizeForLayoutSize(v);
+  const x = px(screen.width * 0.5);
+  await AutoAccessibility.swipe(x, px(screen.height * 0.3), x, px(screen.height * 0.7), 400);
+}
+
 async function swipeUp(): Promise<void> {
   const screen = Dimensions.get("screen");
   const px = (v: number) => PixelRatio.getPixelSizeForLayoutSize(v);
@@ -439,40 +395,426 @@ async function reachHome(
   return looksLikeHome(await AutoAccessibility.scrapeScreen());
 }
 
+/** Raw text of the last transaction-list scrape, for diagnosing a bad read. */
+const LAST_LIST_KEY = "autopilot.lastListScrape";
+
+/** A row's identity across scrolls — the list repeats rows as it moves. */
+const rowKey = (tx: TelebirrTransaction) => `${tx.day}|${tx.time}|${tx.value}`;
+
 /**
  * Open the Transaction History mini-app from home and return its rows.
  *
- * The "Transaction Details" tile is below the fold, so this swipes up and polls
- * for the link before tapping it, then polls for the list — which renders about
- * seven seconds AFTER the mini-app opens, not immediately. The whole thing is
- * retried once, since a swipe or the H5 load can miss on a cold run.
+ * Opened ONCE. The old shape retried the whole thing — swipe, tap, poll — when
+ * a read came back with no rows, so a build whose date format the parser did
+ * not recognise made telebirr and the history open twice over before failing:
+ * two minutes of the screen being taken over to reach the same answer. A second
+ * open cannot succeed where the first failed, because nothing about the screen
+ * changed; what was actually needed was a parser that reads more formats, and
+ * a saved copy of the screen text when it still cannot.
+ *
+ * The tap itself is still retried — a swipe can miss, and that IS worth another
+ * go — but only until the tile is hit, not after the list is open.
  */
-async function readTransactions(): Promise<TelebirrTransaction[]> {
-  for (let attempt = 0; attempt < 2; attempt++) {
-    // Bring the tile into view (up to three swipes) and open it.
-    let opened = false;
-    for (let s = 0; s < 3 && !opened; s++) {
-      await swipeUp();
-      await AutoAccessibility.sleep(900);
-      opened = await AutoAccessibility.clickByText("Transaction Detail");
-    }
-    if (opened) {
-      // Rows appear ~7s after the mini-app opens; poll up to ~18s.
-      for (let i = 0; i < 12; i++) {
-        await AutoAccessibility.sleep(1500);
-        const rows = parseTransactions(await AutoAccessibility.scrapeScreen());
-        if (rows.length) {
-          await AutoAccessibility.pressBack(); // leave the mini-app
-          await AutoAccessibility.sleep(1500);
-          return rows;
-        }
+async function readTransactions(seek?: {
+  reference: string;
+  onFound: (value: number) => void;
+  onSearched?: (opened: number, exhausted: boolean) => void;
+  onOpened?: (n: number) => void;
+}): Promise<TelebirrTransaction[]> {
+  // Bring the tile into view and open it. Up to six swipes: this is cheap and
+  // it is the one step that genuinely benefits from another attempt.
+  let opened = false;
+  for (let s = 0; s < 6 && !opened; s++) {
+    await swipeUp();
+    await AutoAccessibility.sleep(900);
+    opened = await AutoAccessibility.clickByText("Transaction Detail");
+  }
+
+  if (!opened) return [];
+
+  // Rows appear ~7s after the mini-app opens; poll up to ~27s before giving up.
+  let last: ScrapedNode[] = [];
+  for (let i = 0; i < 18; i++) {
+    await AutoAccessibility.sleep(1500);
+    last = await AutoAccessibility.scrapeScreen();
+    const firstRows = parseTransactions(last);
+    if (firstRows.length) {
+      // Opening the receipts is the authority, and the list is only a shortcut
+      // past it. Deciding by "does the list seem to have reference numbers"
+      // was wrong: a token like CASHIN2026 or ID20260913 passes for one, so a
+      // list full of junk looked authoritative and the receipts were never
+      // opened at all. An EXACT match on the number being sought is different —
+      // junk does not coincidentally equal the reference — so that is trusted,
+      // and every other case opens the receipts.
+      //
+      // This runs before anything scrolls: the list is sitting at the top,
+      // which is where a customer who just paid is.
+      const wanted = flatten(seek?.reference ?? "");
+      const listHit = seek
+        ? firstRows.find((row) => row.receipt && flatten(row.receipt) === wanted)
+        : undefined;
+
+      if (seek && listHit && listHit.value > 0) {
+        seek.onFound(listHit.value);
+        seek.onSearched?.(0, true);
+      } else if (seek) {
+        const walk = await findReferenceByOpening(seek.reference, seek.onOpened);
+        if (walk.value !== null) seek.onFound(walk.value);
+        seek.onSearched?.(walk.opened, walk.exhausted);
+
+        // Either the answer is already in hand and the customer should not wait
+        // on a snapshot, or the history is no longer in front and there is
+        // nothing left to scroll. Both end the read here.
+        if (walk.value !== null || !walk.listIntact) return firstRows;
       }
-      // Opened but nothing rendered — back out and try the whole thing again.
-      await AutoAccessibility.pressBack();
-      await AutoAccessibility.sleep(2000);
+
+      const rows = await collectList(await AutoAccessibility.scrapeScreen());
+
+      // Deliberately NOT pressed Back to leave. Back out of a mini-app goes
+      // further than the mini-app — it leaves telebirr — and once the screen in
+      // front is no longer telebirr, another Back starts closing whatever is,
+      // AutoPilot included. `returnToAutoPilot` brings this app forward by
+      // launching it instead, which cannot close anything.
+      return rows;
     }
   }
+
+  // Open, rendered, and still nothing the parser recognises. Keep what was on
+  // screen — this is the case that needs looking at, and without it there is
+  // nothing to go on but guesswork.
+  await saveListScrape(last, 0);
+  // Same here: leaving is `returnToAutoPilot`'s job, not Back's.
   return [];
+}
+
+/**
+ * Scrolls the open history and merges every screenful into one list.
+ *
+ * Stops when a swipe turns up nothing new — the list has bottomed out — or at
+ * the swipe cap, so a long history cannot hold telebirr open indefinitely while
+ * a customer waits on a page.
+ */
+async function collectList(firstScrape: ScrapedNode[]): Promise<TelebirrTransaction[]> {
+  const MAX_SWIPES = 10;
+
+  const merged: TelebirrTransaction[] = [];
+  const seen = new Set<string>();
+  const rawTexts: string[] = [];
+
+  const absorb = (nodes: ScrapedNode[]): number => {
+    for (const node of nodes) {
+      const text = (node.text || node.description || "").trim();
+      if (text) rawTexts.push(text);
+    }
+
+    let added = 0;
+    for (const tx of parseTransactions(nodes)) {
+      const key = rowKey(tx);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      // Re-index so ids stay unique once rows from several screens are joined.
+      merged.push({ ...tx, id: `${tx.day}_${tx.time}_${tx.value}_${merged.length}` });
+      added += 1;
+    }
+    return added;
+  };
+
+  absorb(firstScrape);
+
+  for (let i = 0; i < MAX_SWIPES; i++) {
+    await swipeUp();
+    await AutoAccessibility.sleep(1200);
+    if (absorb(await AutoAccessibility.scrapeScreen()) === 0) break;
+  }
+
+  await saveTexts(rawTexts, merged.length);
+  return merged;
+}
+
+/** A row on the open history, with the point to tap to open its receipt. */
+interface RowTarget {
+  key: string;
+  x: number;
+  y: number;
+  value: number;
+}
+
+/**
+ * Where each row sits on screen.
+ *
+ * The list gives no receipt numbers on most builds, so the only way to read one
+ * is to open the row. Scraped nodes carry their coordinates, so the row's date
+ * node is the thing to tap — it is the one node every row is guaranteed to have.
+ */
+function rowTargets(nodes: ScrapedNode[]): RowTarget[] {
+  const texts = nodes.map((n) => (n.text || n.description || "").trim());
+  const out: RowTarget[] = [];
+
+  for (let i = 0; i < texts.length; i++) {
+    const hit = matchMoment(texts[i], texts[i + 1]);
+    if (!hit) continue;
+
+    const from = i + hit.used;
+    for (let j = from; j < Math.min(from + 3, texts.length); j++) {
+      const amount = texts[j].match(TX_AMOUNT);
+      if (!amount) continue;
+      const value = Number(amount[2].replace(/,/g, "")) * (amount[1] === "-" ? -1 : 1);
+      out.push({
+        key: `${hit.moment.day}|${hit.moment.time}|${value}`,
+        x: nodes[i].x,
+        y: nodes[i].y,
+        value,
+      });
+      break;
+    }
+  }
+
+  return out;
+}
+
+/** Loose comparison — people retype receipt numbers by eye. */
+const flatten = (value: string) => value.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+
+/**
+ * How many receipts one check may open.
+ *
+ * Twenty, newest first, stopping the moment the reference turns up. Only
+ * receipts that actually opened count against it, so a tap that goes nowhere no
+ * longer spends the budget it used to. Each one waits for the screen rather
+ * than sleeping a fixed spell, which is what makes twenty fit where twelve
+ * barely did.
+ */
+export const MAX_RECEIPTS_OPENED = 20;
+
+/**
+ * Looks for a reference by opening receipts, for builds whose list does not
+ * print reference numbers.
+ *
+ * Runs on the already-open history and leaves it open. Only incoming rows are
+ * opened: a payment the agent SENT carries a receipt number too, and must never
+ * settle someone's deposit.
+ */
+/**
+ * How long the receipt-opening may run.
+ *
+ * A count alone cannot bound this: twenty receipts on a slow handset would
+ * outlast the page the customer is watching, and an answer nobody is still
+ * waiting for is no answer. Whichever limit comes first ends the search.
+ */
+const WALK_BUDGET_MS = 140_000;
+
+interface WalkResult {
+  /** The amount on the receipt that carried the reference, when found. */
+  value: number | null;
+  /** False when Back left the history — nothing more may be driven from here. */
+  listIntact: boolean;
+  /** How many receipts were actually opened and read. */
+  opened: number;
+  /** True only when every receipt was seen — not stopped by the cap or clock. */
+  exhausted: boolean;
+}
+
+async function findReferenceByOpening(
+  reference: string,
+  onOpened?: (n: number) => void
+): Promise<WalkResult> {
+  const wanted = flatten(reference);
+  const visited = new Set<string>();
+  const deadline = Date.now() + WALK_BUDGET_MS;
+  let opened = 0;
+  const out = (value: number | null, listIntact: boolean, exhausted: boolean): WalkResult => ({
+    value,
+    listIntact,
+    opened,
+    exhausted,
+  });
+
+  // This runs before anything has scrolled the list, so the top is already in
+  // view. Two swipes back anyway, cheaply, in case opening the tile left it
+  // part-way down: the newest rows are the ones the budget should be spent on.
+  for (let i = 0; i < 2; i++) {
+    await swipeDown();
+    await AutoAccessibility.sleep(450);
+  }
+
+  for (let pass = 0; pass < 8 && opened < MAX_RECEIPTS_OPENED; pass++) {
+    if (Date.now() > deadline) return out(null, true, false);
+    // Back has left the history — there is no list here any more. Stop rather
+    // than tap and Back at whatever is now in front, which is how this used to
+    // walk itself out of telebirr and shut AutoPilot down behind it. Patient,
+    // because a list that is merely still drawing is not a list that is gone.
+    if (!(await waitForList(3000))) return out(null, false, false);
+
+    const listNodes = await AutoAccessibility.scrapeScreen();
+
+    // EVERY row is opened, not just the ones the list called incoming: a row
+    // whose amount did not parse would otherwise be skipped silently, and the
+    // reference might be on exactly that one. Whether it can settle a deposit
+    // is decided after it is found, below.
+    const targets = rowTargets(listNodes).filter((row) => !visited.has(row.key));
+    const listSignature = screenSignature(listNodes);
+
+    for (const row of targets) {
+      if (opened >= MAX_RECEIPTS_OPENED || Date.now() > deadline) break;
+      visited.add(row.key);
+
+      await AutoAccessibility.tap(row.x, row.y);
+      const detail = await waitForChange(listSignature, 3200);
+
+      // A tap that changed nothing opened nothing: the row was not clickable,
+      // or the list had shifted under it. Pressing Back here would leave the
+      // mini-app for no reason, and counting it would spend the budget on a
+      // receipt that was never read.
+      if (!detail.changed) continue;
+
+      opened += 1;
+      onOpened?.(opened);
+
+      // Rather than hunt for whichever field holds the receipt on this build,
+      // ask the only question that matters: is the number we want on screen?
+      const found = await receiptShows(wanted, detail.nodes, 2000);
+
+      await AutoAccessibility.pressBack();
+      const intact = await waitForList(4000);
+
+      if (found) {
+        // Found — but only money that came IN can settle a deposit. A payment
+        // the agent SENT carries a receipt number too, and confirming a deposit
+        // against one would credit a customer for the agent's own outgoing
+        // transfer. Reported as a miss, which is what it is.
+        return out(row.value > 0 ? row.value : null, intact, false);
+      }
+
+      // Back went further than the detail screen. Stop: another would take the
+      // app with it.
+      if (!intact) return out(null, false, false);
+    }
+
+    // Nothing yet on this screenful — scroll and carry on.
+    await swipeUp();
+    await AutoAccessibility.sleep(1100);
+  }
+
+  // Ran out of rows rather than out of budget: the reference really is not in
+  // the history, as far as this search could reach.
+  return out(null, true, opened < MAX_RECEIPTS_OPENED && Date.now() <= deadline);
+}
+
+/**
+ * Waits for the screen to become something other than `from`, up to `timeoutMs`.
+ *
+ * Polling beats sleeping a fixed spell twice over: it returns the instant a
+ * receipt has rendered instead of always paying the worst case, and it waits
+ * longer than a fixed sleep would when the handset is slow. Returns the nodes
+ * it settled on, and whether it actually changed.
+ */
+async function waitForChange(
+  from: string,
+  timeoutMs: number
+): Promise<{ nodes: ScrapedNode[]; changed: boolean }> {
+  const STEP = 400;
+  let nodes: ScrapedNode[] = [];
+
+  for (let waited = 0; waited < timeoutMs; waited += STEP) {
+    await AutoAccessibility.sleep(STEP);
+    nodes = await AutoAccessibility.scrapeScreen();
+    if (screenSignature(nodes) !== from) return { nodes, changed: true };
+  }
+
+  return { nodes, changed: false };
+}
+
+/**
+ * Waits for the transaction list to be in front again, up to `timeoutMs`.
+ *
+ * Coming back from a receipt is not instant: for a moment the screen is neither
+ * the receipt nor the list. Asking once, immediately, sees that in-between and
+ * concludes the history is gone — which ended the search after a single
+ * receipt. Waiting for it is the difference between checking one and checking
+ * twenty.
+ */
+async function waitForList(timeoutMs: number): Promise<boolean> {
+  const STEP = 400;
+  for (let waited = 0; waited < timeoutMs; waited += STEP) {
+    if (rowTargets(await AutoAccessibility.scrapeScreen()).length > 0) return true;
+    await AutoAccessibility.sleep(STEP);
+  }
+  return false;
+}
+
+/**
+ * Looks for `wanted` on the open receipt, allowing for it arriving late.
+ *
+ * `waitForChange` returns on the first change, which may be a spinner rather
+ * than the finished receipt, so judging that frame would miss numbers that were
+ * about to appear. It stops early on a match, and also as soon as the screen
+ * stops changing — a settled receipt without the number is an answer, and
+ * waiting out the full window on each of twenty receipts is not affordable.
+ */
+async function receiptShows(
+  wanted: string,
+  first: ScrapedNode[],
+  timeoutMs: number
+): Promise<boolean> {
+  const STEP = 400;
+  let previous = "";
+  let nodes = first;
+
+  for (let waited = 0; waited <= timeoutMs; waited += STEP) {
+    const signature = screenSignature(nodes);
+    if (flatten(nodes.map((n) => `${n.text} ${n.description}`).join(" ")).includes(wanted)) {
+      return true;
+    }
+    if (signature === previous) return false; // settled, and not here
+
+    previous = signature;
+    await AutoAccessibility.sleep(STEP);
+    nodes = await AutoAccessibility.scrapeScreen();
+  }
+
+  return false;
+}
+
+/** Enough of a screen to tell whether tapping actually went anywhere. */
+function screenSignature(nodes: ScrapedNode[]): string {
+  return nodes
+    .map((n) => (n.text || n.description || "").trim())
+    .filter(Boolean)
+    .join("|")
+    .slice(0, 600);
+}
+
+/** Keeps the screen text of a read, so a bad one can be looked at afterwards. */
+async function saveTexts(texts: string[], rows: number): Promise<void> {
+  try {
+    await AsyncStorage.setItem(
+      LAST_LIST_KEY,
+      JSON.stringify({ at: Date.now(), rows, texts: texts.slice(0, 400) }),
+    );
+  } catch {
+    // A diagnostic that cannot be saved must not fail the read it describes.
+  }
+}
+
+async function saveListScrape(nodes: ScrapedNode[], rows: number): Promise<void> {
+  const texts = nodes
+    .map((node) => (node.text || node.description || "").trim())
+    .filter(Boolean);
+  await saveTexts(texts, rows);
+}
+
+/** The last transaction-list scrape, for the diagnostic on the alerts screen. */
+export async function loadLastListScrape(): Promise<{
+  at: number;
+  rows: number;
+  texts: string[];
+} | null> {
+  try {
+    const raw = await AsyncStorage.getItem(LAST_LIST_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -488,12 +830,49 @@ async function readTransactions(): Promise<TelebirrTransaction[]> {
  *   - The home balance is masked as ****** until the eye toggle is tapped.
  * `onPhase` drives the progress list on the account screen.
  */
+/**
+ * The balance from telebirr's home screen, revealing it if it is masked.
+ *
+ * Reveal ONLY when the main balance itself cannot be read. Keying off
+ * parseBalance — not "is any ****** on screen" — matters: the Endekise/Reward
+ * figures are separately masked, so tapping the eye while the main total is
+ * already showing would just hide it again.
+ */
+async function readHomeBalance(): Promise<{ balance: number | null; nodes: ScrapedNode[] }> {
+  let nodes = await AutoAccessibility.scrapeScreen();
+
+  // Read the balance off the balance screen, or not at all. Any other screen
+  // that happens to show a number would be read as one otherwise.
+  if (!looksLikeHome(nodes)) return { balance: null, nodes };
+
+  if (parseBalance(nodes, { strict: true }) === null) {
+    await tapFraction(BALANCE_EYE.fx, BALANCE_EYE.fy);
+    await AutoAccessibility.sleep(1200);
+    nodes = await AutoAccessibility.scrapeScreen();
+  }
+
+  return { balance: parseBalance(nodes, { strict: true }), nodes };
+}
+
 export async function syncTelebirr(
-  onPhase: (phase: SyncPhase) => void
+  onPhase: (phase: SyncPhase) => void,
+  /**
+   * A reference to settle while we are in there.
+   *
+   * Passed down so a deposit check is ONE journey into telebirr: sign in, read
+   * the balance, read the history, and — only if the list carries no reference
+   * numbers — open receipts until the number turns up. Opening telebirr a
+   * second time to do the looking would double the wait for no benefit.
+   */
+  seek?: { reference: string; onOpened?: (n: number) => void }
 ): Promise<{
   balance: number | null;
   transactions: TelebirrTransaction[];
   nodes: ScrapedNode[];
+  /** The amount on the receipt that carried `seek.reference`, when found. */
+  seekAmount: number | null;
+  /** How far the search actually got, so a miss can be reported honestly. */
+  seekSearch: { opened: number; exhausted: boolean } | null;
 }> {
   // The signed-in agent's own credentials; throws when nobody has enrolled.
   const { pin } = await requireAgent();
@@ -512,28 +891,33 @@ export async function syncTelebirr(
   const home = await reachHome(pin, onPhase);
 
   onPhase("reading");
-  let nodes = await AutoAccessibility.scrapeScreen();
-  // Reveal ONLY when the main balance itself can't be read (masked or absent).
-  // Keying off parseBalance — not "is any ****** on screen" — matters: the
-  // Endekise/Reward figures are separately masked, so tapping the eye while the
-  // main total is already showing would just hide it again.
-  if (parseBalance(nodes) === null) {
-    await tapFraction(BALANCE_EYE.fx, BALANCE_EYE.fy);
-    await AutoAccessibility.sleep(1200);
-    nodes = await AutoAccessibility.scrapeScreen();
-  }
-  const balance = parseBalance(nodes);
+  const { balance, nodes } = await readHomeBalance();
 
   // Then the receipts, from the "Transaction Details" tile (opens telebirr's
   // Transaction History mini-app). Only attempted once we know we are on home.
-  const transactions = home ? await readTransactions() : [];
+  let seekAmount: number | null = null;
+  let seekSearch: { opened: number; exhausted: boolean } | null = null;
+  const transactions = home
+    ? await readTransactions(
+        seek && {
+          reference: seek.reference,
+          onOpened: seek.onOpened,
+          onFound: (value) => {
+            seekAmount = value;
+          },
+          onSearched: (opened, exhausted) => {
+            seekSearch = { opened, exhausted };
+          },
+        }
+      )
+    : [];
 
   // The read is done in telebirr; put AutoPilot back in front of the user.
   onPhase("returning");
   await returnToAutoPilot();
 
   onPhase("done");
-  return { balance, transactions, nodes };
+  return { balance, transactions, nodes, seekAmount, seekSearch };
 }
 
 /* ------------------------------------------------------------------ *
@@ -572,6 +956,16 @@ export interface SendResult {
   /** Every step, in order, with what it matched — shown to the user on failure. */
   log: string[];
   failedAt?: SendPhase;
+  /**
+   * telebirr's balance AFTER the transfer, read back before leaving.
+   *
+   * Null when it could not be read. The figure held in the app is wrong by
+   * exactly the amount just sent, and there is no arithmetic that can fix
+   * that safely — a send whose amount was altered on telebirr's own screen, or
+   * that carried a fee, would leave the app confidently displaying a number
+   * that never existed. So it is read, not calculated.
+   */
+  balance?: number | null;
 }
 
 /** Clicks the first candidate that exists on screen; returns which one, or null. */
@@ -670,23 +1064,33 @@ export async function signInAndSend(
     log.push(`opened ${pkg}`);
     await AutoAccessibility.sleep(4000);
 
-    // Login is detected by the on-screen text, not a probe for et_input, which
-    // does not exist on this build. The number is prefilled, so only Next + PIN.
+    // Get to HOME before looking for Send Money, rather than assuming that
+    // "not the login screen" means home. telebirr resumes wherever it was left,
+    // and after a deposit check that is the transaction list — a screen with no
+    // Send Money on it, which is what made a payout die at the first menu tap.
+    // reachHome signs in when asked and backs out of anything else (list,
+    // receipt, splash, mini-app) until home is genuinely on screen.
     onPhase("login");
-    if (looksLikeLogin(await AutoAccessibility.scrapeScreen())) {
-      if (!(await AutoAccessibility.clickByText("Next"))) {
-        return stop("login", "sign-in: Next not found on the login screen");
-      }
-      await AutoAccessibility.sleep(6000);
-      await tapPin(pin);
-      await AutoAccessibility.sleep(6000);
-      log.push("signed in");
-    } else {
-      log.push("already signed in");
+    const atHome = await reachHome(pin, (p) => onPhase(p === "pin" ? "pin" : "login"));
+    if (!atHome) {
+      return stop("login", "could not get telebirr back to its home screen");
     }
+    log.push("at telebirr home");
 
     onPhase("menu");
-    const menu = await clickAnyText(SEND_MENU_LABELS);
+    let menu = await clickAnyText(SEND_MENU_LABELS);
+    // A missing Send Money is not fatal on the first look. `looksLikeHome` also
+    // accepts a bare "Balance", which the transaction list carries too, so the
+    // run can believe it is home while the list is still up. Backing out and
+    // relaunching lands on the real home, where the tile exists.
+    for (let attempt = 0; !menu && attempt < 2; attempt++) {
+      log.push("no Send Money on screen — backing out to home");
+      await AutoAccessibility.pressBack();
+      await AutoAccessibility.sleep(1500);
+      await openKnownApp(TELEBIRR);
+      await AutoAccessibility.sleep(3500);
+      menu = await clickAnyText(SEND_MENU_LABELS);
+    }
     if (!menu) {
       return stop("menu", `no Send Money entry found (tried ${SEND_MENU_LABELS.join(", ")})`);
     }
@@ -743,15 +1147,53 @@ export async function signInAndSend(
       .map((n) => (n.text || "").trim())
       .find((t) => /^[A-Z0-9]{8,}$/.test(t));
 
+    if (!ok) {
+      onPhase("returning");
+      await returnToAutoPilot();
+      return stop("pin", "PIN entered but no success screen — wrong PIN, or telebirr is on Wi-Fi");
+    }
+
+    // Read the new balance while still inside telebirr. Doing it here is what
+    // keeps it to one trip: going back for it afterwards would mean opening
+    // telebirr and signing in all over again.
+    let balance: number | null = null;
+    try {
+      // The success screen sits in front of home until it is dismissed, and
+      // it shows the sum just sent. Dismissing it is what puts the real
+      // balance on screen; reading without doing so reads the transfer amount.
+      const dismissed = await clickAnyText([
+        "Finished",
+        "Finish",
+        "Done",
+        "Complete",
+        "Completed",
+        "Back to Home",
+        "OK",
+      ]);
+      if (dismissed) {
+        log.push(`tapped "${dismissed}"`);
+        await AutoAccessibility.sleep(3000);
+      }
+
+      // `reachHome` still runs: it confirms home is really in front, and
+      // relaunches telebirr if the success screen led somewhere else instead.
+      if (await reachHome(pin, () => {})) {
+        balance = (await readHomeBalance()).balance;
+        log.push(balance === null ? "could not re-read the balance" : `balance now ${balance}`);
+      } else {
+        log.push("could not get back to home to re-read the balance");
+      }
+    } catch {
+      // The transfer already succeeded; failing to re-read the balance must not
+      // turn a sent payment into a reported failure.
+    }
+
     onPhase("returning");
     await returnToAutoPilot();
 
-    if (!ok) {
-      return stop("pin", "PIN entered but no success screen — wrong PIN, or telebirr is on Wi-Fi");
-    }
     onPhase("done");
     log.push(`sent ETB ${amountBirr} to +251${recipientNationalDigits}${receipt ? ` · ${receipt}` : ""}`);
-    return { ok: true, log };
+    return { ok: true, log, balance };
   } catch (e: any) {
     return stop("opening", e?.message ?? String(e));
   }

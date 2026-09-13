@@ -35,6 +35,8 @@ export type CustomerRequest =
       amount: number;
       /** The customer's own number, canonical +251 — where the cash-out goes. */
       phone: string;
+      /** The stored row's id; what the handset quotes when it reports back. */
+      requestId: string;
     };
 
 /**

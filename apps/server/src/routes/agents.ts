@@ -4,6 +4,11 @@ import { prisma } from "../prisma.js";
 import { phoneSchema } from "../lib/phone.js";
 import { Prisma } from "../generated/prisma/client.js";
 import { requireAuth } from "../middleware/auth.js";
+import {
+  expireStaleCashOuts,
+  recentCashOuts,
+  resolveCashOut,
+} from "../lib/cashOutRequests.js";
 import { authenticateAgent } from "../lib/agentAuth.js";
 import {
   expireStale,
@@ -211,6 +216,92 @@ agentsRouter.post("/deposit/history", async (req, res) => {
   await expireStale(auth.agent.id);
 
   res.json({ requests: await recentRequests(auth.agent.id) });
+});
+
+/**
+ * POST /api/agents/cashout/resolve — public: phone + PIN from the handset.
+ *
+ * How a payout stops being "pending" in the record. The handset is the only
+ * thing that knows whether telebirr actually made the transfer, so this is the
+ * one report there is, and the row refuses a second one.
+ */
+const resolveCashOutSchema = z
+  .object({
+    phone: phoneSchema,
+    pin: z.string().trim().regex(/^\d{6}$/, "The PIN must be exactly 6 digits."),
+    requestId: z.string().trim().min(8).max(80),
+    sent: z.boolean(),
+    /** telebirr's balance after the send, when the handset could read it. */
+    balanceAfter: z.number().optional(),
+    reason: z.string().trim().max(500).optional(),
+  })
+  // A failure has to say why: "it did not work" with no reason is the one
+  // outcome nobody can act on afterwards.
+  .refine((value) => value.sent || !!value.reason, {
+    message: "A failed cash-out must carry a reason.",
+    path: ["reason"],
+  });
+
+agentsRouter.post("/cashout/resolve", async (req, res) => {
+  const parsed = resolveCashOutSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: "INVALID_BODY", details: z.flattenError(parsed.error) });
+  }
+
+  const { phone, pin, requestId, sent, balanceAfter, reason } = parsed.data;
+
+  const auth = await authenticateAgent(phone, pin);
+  if (!auth.ok) {
+    if (auth.code === "TOO_MANY_ATTEMPTS") {
+      return res.status(429).json({ error: auth.code, retryAfterSeconds: auth.retryAfterSeconds });
+    }
+    if (auth.code === "AGENT_NOT_ACTIVE") {
+      return res.status(403).json({ error: auth.code, status: auth.status });
+    }
+    return res.status(401).json({ error: auth.code });
+  }
+
+  const result = await resolveCashOut(
+    requestId,
+    auth.agent.id,
+    sent ? { status: "SENT", balanceAfter } : { status: "FAILED", reason: reason! },
+  );
+
+  if (!result.ok) {
+    return res
+      .status(result.code === "NOT_FOUND" ? 404 : 409)
+      .json({ error: result.code, status: result.status });
+  }
+
+  res.json({ request: result.request });
+});
+
+/**
+ * POST /api/agents/cashout/history — the agent's own recent cash-outs.
+ *
+ * The other half of what the app's notification list restores from. Without it
+ * a payout lived only in one phone's storage, so a reinstall — or simply a
+ * second device — lost every record that money had gone out.
+ */
+agentsRouter.post("/cashout/history", async (req, res) => {
+  const parsed = historySchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: "INVALID_BODY" });
+  }
+
+  const auth = await authenticateAgent(parsed.data.phone, parsed.data.pin);
+  if (!auth.ok) {
+    if (auth.code === "TOO_MANY_ATTEMPTS") {
+      return res.status(429).json({ error: auth.code, retryAfterSeconds: auth.retryAfterSeconds });
+    }
+    return res.status(auth.code === "AGENT_NOT_ACTIVE" ? 403 : 401).json({ error: auth.code });
+  }
+
+  // Anything the phone never reported is closed off first, so the list cannot
+  // show a payout that has been "sending" since yesterday.
+  await expireStaleCashOuts(auth.agent.id);
+
+  res.json({ requests: await recentCashOuts(auth.agent.id) });
 });
 
 /**

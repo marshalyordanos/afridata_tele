@@ -10,7 +10,8 @@ import {
 import { useRouter } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
-import { C, R, CARD_SHADOW } from "../lib/theme";
+import { C, R, SP, T, CARD_SHADOW } from "../lib/theme";
+import { ScreenHeader, useScrolled } from "../components/ScreenHeader";
 import { useAccessibility } from "../lib/accessibility";
 import { useAgent } from "../lib/agent";
 import { maskPhone } from "../lib/telebirrData";
@@ -39,6 +40,7 @@ export default function Settings() {
   // Shared with the home screen's banner, so both read the same live state —
   // including the gap where the switch is on but Android has not bound the
   // service yet, when automation still cannot run.
+  const { scrolled, onScroll } = useScrolled();
   const access = useAccessibility();
   const { agent, signOut } = useAgent();
 
@@ -69,18 +71,15 @@ export default function Settings() {
   const openAndroidSettings = access.open;
 
   return (
-    <ScrollView style={s.screen} contentContainerStyle={{ paddingBottom: 32 }}>
-      <View style={{ height: insets.top }} />
+    <View style={s.screen}>
+      <ScreenHeader title="Settings" subtitle="Permissions and automation" back scrolled={scrolled} />
 
-      <View style={s.header}>
-        <Pressable style={s.backBtn} onPress={() => router.back()} hitSlop={6}>
-          <Feather name="chevron-left" size={22} color={C.text} />
-        </Pressable>
-        <View style={{ flex: 1 }}>
-          <Text style={s.title}>Settings</Text>
-          <Text style={s.subtitle}>Permissions and automation</Text>
-        </View>
-      </View>
+      <ScrollView
+        onScroll={onScroll}
+        scrollEventThrottle={16}
+        contentContainerStyle={{ paddingBottom: insets.bottom + SP.xxl }}
+        showsVerticalScrollIndicator={false}
+      >
 
       <Text style={s.sectionLabel}>Agent</Text>
 
@@ -257,69 +256,48 @@ export default function Settings() {
           <Feather name="chevron-right" size={15} color="#aab5c9" />
         </Pressable>
       </View>
-    </ScrollView>
+      </ScrollView>
+    </View>
   );
 }
 
 const s = StyleSheet.create({
   screen: { flex: 1, backgroundColor: C.ground },
-  header: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    paddingHorizontal: 20,
-    paddingTop: 8,
-    paddingBottom: 10,
-  },
-  backBtn: {
-    width: 40,
-    height: 40,
-    marginLeft: -12,
-    alignItems: "center",
-    justifyContent: "center",
-    borderRadius: R.row,
-  },
-  title: { fontSize: 19, fontWeight: "600", color: C.text, letterSpacing: -0.3 },
-  subtitle: { fontSize: 12, color: C.dim, marginTop: 1 },
-
   sectionLabel: {
-    fontSize: 11,
-    fontWeight: "600",
-    letterSpacing: 0.9,
-    textTransform: "uppercase",
-    color: C.dim,
-    marginHorizontal: 20,
-    marginTop: 18,
-    marginBottom: 10,
+    ...T.label,
+    color: C.faint,
+    marginHorizontal: SP.gutter,
+    marginTop: SP.xl,
+    marginBottom: SP.sm,
   },
 
   card: {
-    marginHorizontal: 20,
+    marginHorizontal: SP.gutter,
     backgroundColor: C.surface,
     borderWidth: 1,
     borderColor: C.border,
     borderRadius: R.card,
-    padding: 18,
-    gap: 14,
+    padding: SP.lg,
+    gap: SP.md,
     ...CARD_SHADOW,
   },
-  statusRow: { flexDirection: "row", alignItems: "center", gap: 12 },
-  tile: { width: 42, height: 42, borderRadius: 21, alignItems: "center", justifyContent: "center" },
-  cardTitle: { fontSize: 15, fontWeight: "600", color: C.text, letterSpacing: -0.2 },
-  dim: { fontSize: 12, color: C.dim, lineHeight: 17 },
+  statusRow: { flexDirection: "row", alignItems: "center", gap: SP.md },
+  tile: { width: 42, height: 42, borderRadius: 13, alignItems: "center", justifyContent: "center" },
+  cardTitle: { ...T.heading, color: C.text },
+  dim: { ...T.small, color: C.dim, lineHeight: 18 },
 
   pill: {
     flexDirection: "row",
     alignItems: "center",
     alignSelf: "flex-start",
     gap: 6,
-    height: 28,
-    paddingHorizontal: 11,
+    height: 26,
+    paddingHorizontal: 10,
     borderRadius: R.pill,
     borderWidth: 1,
   },
   pillDot: { width: 6, height: 6, borderRadius: 3 },
-  pillText: { fontSize: 12, fontWeight: "600" },
+  pillText: { fontSize: 11.5, fontWeight: "700" },
 
   divider: { height: 1, backgroundColor: C.divider },
 
@@ -334,10 +312,10 @@ const s = StyleSheet.create({
     backgroundColor: C.accentSoft,
   },
   stepNumText: { fontSize: 11, fontWeight: "700", color: C.accent },
-  stepText: { flex: 1, fontSize: 13, color: C.text, lineHeight: 19 },
+  stepText: { flex: 1, ...T.small, color: C.text, lineHeight: 19 },
 
   grantRow: { flexDirection: "row", alignItems: "flex-start", gap: 10 },
-  grantText: { flex: 1, fontSize: 13, color: C.text, lineHeight: 19 },
+  grantText: { flex: 1, ...T.small, color: C.text, lineHeight: 19 },
 
   primaryBtn: {
     flexDirection: "row",
@@ -348,23 +326,23 @@ const s = StyleSheet.create({
     borderRadius: R.btn,
     backgroundColor: C.accent,
   },
-  primaryBtnText: { fontSize: 14, fontWeight: "600", color: "#fff" },
+  primaryBtnText: { ...T.body, fontWeight: "600", color: "#fff" },
   secondaryBtn: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
     gap: 8,
-    height: 42,
+    height: 44,
     borderRadius: R.btn,
     borderWidth: 1,
     borderColor: C.border,
     backgroundColor: C.surfaceAlt,
   },
-  secondaryBtnText: { fontSize: 13, fontWeight: "600", color: C.dim },
+  secondaryBtnText: { ...T.small, fontWeight: "700", color: C.dim },
   pressed: { opacity: 0.75 },
   pressedRow: { backgroundColor: C.surfaceAlt },
 
-  footnote: { fontSize: 11, color: C.faint, lineHeight: 16 },
+  footnote: { ...T.micro, color: C.faint, lineHeight: 16 },
   noticeBox: {
     flexDirection: "row",
     gap: 8,
@@ -384,5 +362,5 @@ const s = StyleSheet.create({
     ...CARD_SHADOW,
   },
   listRow: { flexDirection: "row", alignItems: "center", gap: 12, padding: 16 },
-  listTitle: { fontSize: 14, fontWeight: "500", color: C.text },
+  listTitle: { ...T.body, fontWeight: "600", color: C.text },
 });

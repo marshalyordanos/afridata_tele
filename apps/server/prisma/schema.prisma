@@ -99,6 +99,7 @@ model Agent {
   updatedAt      DateTime    @updatedAt
 
   depositRequests DepositRequest[]
+  cashOutRequests CashOutRequest[]
 
   @@index([status])
   @@index([createdAt])
@@ -163,5 +164,41 @@ enum DepositRequestStatus {
   PENDING
   CONFIRMED
   NOT_FOUND
+  FAILED
+}
+
+/// A customer's cash-out, from the request to the transfer the handset made.
+///
+/// The mirror of DepositRequest, and a row for the same reason: the server never
+/// performs the transfer — the agent's phone does, out of its own telebirr float
+/// — so the request has to outlive both sides being restarted. It is also the
+/// only record that money left: telebirr tells nobody but the handset, and
+/// without this the payout existed solely in one phone's local storage.
+model CashOutRequest {
+  id           String               @id @default(cuid())
+  /// Issued by the server; how the handset's report finds its way back.
+  requestId    String               @unique
+  /// The customer's own number, canonical +251 — where the cash-out went.
+  phone        String
+  /// What the customer asked for. The server never verifies it.
+  amount       Float
+  status       CashOutRequestStatus @default(PENDING)
+  /// Why a transfer could not be made, in the handset's own words.
+  reason       String?
+  /// telebirr's balance after a completed send, as the handset read it.
+  balanceAfter Float?
+  createdAt    DateTime             @default(now())
+  resolvedAt   DateTime?
+
+  agentId      String
+  agent        Agent                @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@index([agentId, createdAt])
+  @@index([status])
+}
+
+enum CashOutRequestStatus {
+  PENDING
+  SENT
   FAILED
 }

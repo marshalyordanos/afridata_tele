@@ -128,12 +128,12 @@ export async function runMacro(macro: Macro): Promise<RunResult> {
           if (!pkg) throw new Error(`${step.pkg} is not installed on this device.`);
           await AutoAccessibility.openApp(pkg);
           await AutoAccessibility.sleep(1500);
-          log.push(`${tag} → opened ${pkg}`);
+          log.push(`${tag} · opened ${pkg}`);
           break;
         }
         case "clickText": {
           const ok = await AutoAccessibility.clickByText(step.text);
-          log.push(`${tag} → "${step.text}" ${ok ? "clicked" : "NOT FOUND"}`);
+          log.push(`${tag} · "${step.text}" ${ok ? "clicked" : "NOT FOUND"}`);
           await AutoAccessibility.sleep(800);
           break;
         }
@@ -142,21 +142,21 @@ export async function runMacro(macro: Macro): Promise<RunResult> {
           const tried = [...(step.viewIds ?? []), ...(step.texts ?? [])];
           log.push(
             hit
-              ? `${tag} → "${hit}" clicked`
-              : `${tag} → NONE of [${tried.join(", ")}] on screen`,
+              ? `${tag} · "${hit}" clicked`
+              : `${tag} · NONE of [${tried.join(", ")}] on screen`,
           );
           await AutoAccessibility.sleep(800);
           break;
         }
         case "clickViewId": {
           const ok = await AutoAccessibility.clickByViewId(step.viewId);
-          log.push(`${tag} → ${step.viewId} ${ok ? "clicked" : "NOT FOUND"}`);
+          log.push(`${tag} · ${step.viewId} ${ok ? "clicked" : "NOT FOUND"}`);
           await AutoAccessibility.sleep(800);
           break;
         }
         case "tap":
           await AutoAccessibility.tap(step.x, step.y);
-          log.push(`${tag} → (${step.x}, ${step.y})`);
+          log.push(`${tag} · (${step.x}, ${step.y})`);
           await AutoAccessibility.sleep(600);
           break;
         case "tapFraction": {
@@ -165,18 +165,18 @@ export async function runMacro(macro: Macro): Promise<RunResult> {
           const x = PixelRatio.getPixelSizeForLayoutSize(screen.width * step.fx);
           const y = PixelRatio.getPixelSizeForLayoutSize(screen.height * step.fy);
           await AutoAccessibility.tap(x, y);
-          log.push(`${tag} → ${step.label ?? "tap"} at (${x}, ${y})`);
+          log.push(`${tag} · ${step.label ?? "tap"} at (${x}, ${y})`);
           await AutoAccessibility.sleep(700);
           break;
         }
         case "swipe":
           await AutoAccessibility.swipe(step.x1, step.y1, step.x2, step.y2, step.dur ?? 300);
-          log.push(`${tag} → swipe`);
+          log.push(`${tag} · swipe`);
           await AutoAccessibility.sleep(600);
           break;
         case "type":
           await AutoAccessibility.typeText(step.text);
-          log.push(`${tag} → typed "${step.text}"`);
+          log.push(`${tag} · typed "${step.text}"`);
           break;
         case "back":
           await AutoAccessibility.pressBack();
@@ -190,7 +190,7 @@ export async function runMacro(macro: Macro): Promise<RunResult> {
           break;
         case "wait":
           await AutoAccessibility.sleep(step.ms);
-          log.push(`${tag} → ${step.ms}ms`);
+          log.push(`${tag} · ${step.ms}ms`);
           break;
         case "waitFor": {
           const limit = step.timeoutMs ?? 15000;
@@ -207,8 +207,8 @@ export async function runMacro(macro: Macro): Promise<RunResult> {
           const took = Date.now() - started;
           log.push(
             found
-              ? `${tag} → "${what}" appeared after ${took}ms`
-              : `${tag} → "${what}" TIMED OUT after ${limit}ms`,
+              ? `${tag} · "${what}" appeared after ${took}ms`
+              : `${tag} · "${what}" TIMED OUT after ${limit}ms`,
           );
           break;
         }
@@ -222,7 +222,7 @@ export async function runMacro(macro: Macro): Promise<RunResult> {
             viewId: n.viewId,
             clickable: n.clickable,
           }));
-          log.push(`${tag} → captured ${nodes.length} nodes as "${step.label}"`);
+          log.push(`${tag} · captured ${nodes.length} nodes as "${step.label}"`);
           break;
         }
       }

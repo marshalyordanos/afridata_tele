@@ -13,11 +13,13 @@ import {
   TelebirrTransaction,
   EMPTY_SNAPSHOT,
 } from "../../lib/telebirrData";
-import { C, R, TABULAR } from "../../lib/theme";
+import { C, R, SP, T, TABULAR } from "../../lib/theme";
+import { ScreenHeader, HeaderButton, useScrolled } from "../../components/ScreenHeader";
 
 export default function Receipt() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  const { scrolled, onScroll } = useScrolled();
   const { id } = useLocalSearchParams<{ id: string }>();
 
   const [snapshot, setSnapshot] = useState<TelebirrSnapshot>(EMPTY_SNAPSHOT);
@@ -71,18 +73,21 @@ export default function Receipt() {
   ];
 
   return (
-    <ScrollView style={s.screen} contentContainerStyle={{ paddingBottom: insets.bottom + 28 }}>
-      <View style={{ height: insets.top }} />
+    <View style={s.screen}>
+      <ScreenHeader
+        title="Receipt"
+        subtitle={`${tx.day} · ${tx.time}`}
+        back
+        scrolled={scrolled}
+        right={<HeaderButton icon="share" onPress={share} tint={C.text} />}
+      />
 
-      <View style={s.header}>
-        <Pressable style={s.iconBtn} onPress={() => router.back()} hitSlop={6}>
-          <Feather name="chevron-left" size={22} color={C.text} />
-        </Pressable>
-        <Text style={s.title}>Receipt</Text>
-        <Pressable style={[s.iconBtn, { marginLeft: 0, marginRight: -11 }]} onPress={share} hitSlop={6}>
-          <Feather name="share" size={19} color={C.text} />
-        </Pressable>
-      </View>
+      <ScrollView
+        onScroll={onScroll}
+        scrollEventThrottle={16}
+        contentContainerStyle={{ paddingBottom: insets.bottom + SP.xxl }}
+        showsVerticalScrollIndicator={false}
+      >
 
       {/* Hero */}
       <View style={s.hero}>
@@ -166,7 +171,8 @@ export default function Receipt() {
           <Text style={s.secondaryBtnText}>Open in telebirr</Text>
         </Pressable>
       </View>
-    </ScrollView>
+      </ScrollView>
+    </View>
   );
 }
 
@@ -177,7 +183,7 @@ const s = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 10,
-    paddingHorizontal: 20,
+    paddingHorizontal: SP.gutter,
     paddingTop: 4,
     paddingBottom: 8,
   },
@@ -210,7 +216,7 @@ const s = StyleSheet.create({
   statusText: { fontSize: 12, fontWeight: "600", color: C.green },
 
   card: {
-    marginHorizontal: 20,
+    marginHorizontal: SP.gutter,
     backgroundColor: C.surface,
     borderWidth: 1,
     borderColor: C.border,
@@ -250,7 +256,7 @@ const s = StyleSheet.create({
   sourceId: { fontSize: 11, color: "#aab5c9", fontFamily: "monospace" },
   sourceText: { flex: 1, fontSize: 11, color: C.dim, fontFamily: "monospace" },
 
-  actions: { gap: 10, marginHorizontal: 20, marginTop: 20 },
+  actions: { gap: 10, marginHorizontal: SP.gutter, marginTop: 20 },
   primaryBtn: {
     flexDirection: "row",
     alignItems: "center",

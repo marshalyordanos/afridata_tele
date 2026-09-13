@@ -25,6 +25,8 @@ export interface ConfirmProgress {
   stage: ConfirmStage;
   amount?: number;
   reason?: string;
+  /** Receipts opened so far, when the list gave no reference numbers. */
+  opened?: number;
 }
 
 /** telebirr receipts are compared loosely — people retype them by eye. */
@@ -53,11 +55,26 @@ async function runLookup(
   const agent = await requireAgent();
 
   let match: TelebirrTransaction | undefined;
+  // Everything actually looked at: the fresh read plus what was already on file.
+  let pool: TelebirrTransaction[] = [];
+  // How many receipts the read had to open, when the list carried no numbers.
+  let opened = 0;
+  // Whether the search saw every receipt, or stopped at the cap or the clock.
+  let exhausted = true;
   try {
     onProgress({ requestId, stage: "reading" });
     // Waits for any run already in progress rather than opening telebirr on top
-    // of it; a customer is watching a page, so this one has to happen.
-    const result = await queueTelebirr(`deposit ${reference}`, () => syncTelebirr(() => {}));
+    // of it; a customer is watching a page, so this one has to happen. The
+    // reference goes down with it so the whole check is one trip into telebirr.
+    const result = await queueTelebirr(`deposit ${reference}`, () =>
+      syncTelebirr(() => {}, {
+        reference,
+        onOpened: (n) => {
+          opened = n;
+          onProgress({ requestId, stage: "reading", opened: n });
+        },
+      }),
+    );
 
     // Keep what the read produced, exactly as a manual sync would.
     const previous = await loadSnapshot();
@@ -68,9 +85,24 @@ async function runLookup(
       readAt: Date.now(),
     });
 
-    match =
-      findByReference(result.transactions, reference) ??
-      findByReference(previous.transactions, reference);
+    pool = [...result.transactions, ...previous.transactions];
+    match = findByReference(pool, reference);
+
+    // The list had no reference numbers, so the receipts themselves were opened
+    // and one of them carried this reference. That IS the confirmation — the
+    // amount is the one telebirr printed on the row it was found on.
+    exhausted = result.seekSearch ? result.seekSearch.exhausted : true;
+    if (result.seekSearch) opened = result.seekSearch.opened;
+
+    if (!match && result.seekAmount !== null) {
+      await report(agent.phone, agent.pin, {
+        requestId,
+        found: true,
+        amount: result.seekAmount,
+      });
+      onProgress({ requestId, stage: "confirmed", amount: result.seekAmount });
+      return;
+    }
   } catch (error) {
     // Could not drive telebirr at all — accessibility off, telebirr missing,
     // sign-in failed. The customer is told to wait rather than told "no such
@@ -82,6 +114,25 @@ async function runLookup(
   }
 
   if (!match) {
+    // Nothing was read at all — a different answer from "not there", and the
+    // only one that is AutoPilot's fault rather than the customer's.
+    if (pool.length === 0) {
+      const reason = "Could not read the telebirr transaction list.";
+      await report(agent.phone, agent.pin, { requestId, found: false, reason });
+      onProgress({ requestId, stage: "failed", reason });
+      return;
+    }
+
+    // Receipts were read — either from the list, or by opening them — and this
+    // reference was on none of them. If the opening hit its cap there may be
+    // older ones it never reached, so say so rather than claiming certainty.
+    if (!exhausted) {
+      const reason = `Checked the ${opened} most recent receipts and did not find it.`;
+      await report(agent.phone, agent.pin, { requestId, found: false, reason });
+      onProgress({ requestId, stage: "failed", reason });
+      return;
+    }
+
     await report(agent.phone, agent.pin, { requestId, found: false });
     onProgress({ requestId, stage: "not_found" });
     return;

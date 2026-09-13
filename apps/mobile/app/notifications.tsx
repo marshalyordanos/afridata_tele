@@ -1,11 +1,23 @@
-import { useEffect, useRef } from "react";
-import { View, Text, FlatList, Pressable, StyleSheet, ActivityIndicator } from "react-native";
+import { useEffect, useRef, useState } from "react";
+import {
+  View,
+  Text,
+  FlatList,
+  Pressable,
+  StyleSheet,
+  ActivityIndicator,
+  Alert,
+  Share,
+} from "react-native";
 import { useRouter } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
 import { useRealtime, type CustomerRequest } from "../lib/realtime";
+import type { SendPhase } from "../lib/telebirr";
 import { money, relativeTime } from "../lib/telebirrData";
-import { C, R, TABULAR } from "../lib/theme";
+import { loadLastListScrape } from "../lib/telebirr";
+import { C, R, SP, T, TABULAR, HIT } from "../lib/theme";
+import { ScreenHeader } from "../components/ScreenHeader";
 
 /** The connection line under the title — the agent's cue that pushes arrive. */
 const STATE_TEXT = {
@@ -24,7 +36,13 @@ function depositStatus(item: Extract<CustomerRequest, { kind: "deposit" }>): {
     case "queued":
       return { text: "Waiting to check telebirr", tone: "dim", busy: true };
     case "reading":
-      return { text: "Checking telebirr…", tone: "dim", busy: true };
+      return {
+        text: item.opened
+          ? `Opening receipts in telebirr (${item.opened})…`
+          : "Checking telebirr…",
+        tone: "dim",
+        busy: true,
+      };
     case "confirmed":
       return {
         text: `Confirmed · ETB ${money(item.amount ?? 0)} credited`,
@@ -38,10 +56,62 @@ function depositStatus(item: Extract<CustomerRequest, { kind: "deposit" }>): {
   }
 }
 
+/** The line under a cash-out, and the colour it reads in. */
+function cashOutStatus(item: Extract<CustomerRequest, { kind: "withdrawal" }>): {
+  text: string;
+  tone: "dim" | "green" | "red";
+  busy: boolean;
+} {
+  switch (item.stage) {
+    case "awaiting":
+      return { text: `Cash out to ${item.phone}`, tone: "dim", busy: false };
+    case "queued":
+      return { text: "Waiting for telebirr", tone: "dim", busy: true };
+    case "sending":
+      return { text: SEND_PHASE_TEXT[item.phase ?? "opening"], tone: "dim", busy: true };
+    case "sent":
+      return { text: `Sent to ${item.phone}`, tone: "green", busy: false };
+    case "failed":
+      return { text: item.reason ?? "The transfer failed", tone: "red", busy: false };
+    case "interrupted":
+      return { text: item.reason ?? "Interrupted — check telebirr", tone: "red", busy: false };
+  }
+}
+
+/** What each telebirr step is called, so the agent can follow the payout. */
+const SEND_PHASE_TEXT: Record<SendPhase, string> = {
+  opening: "Opening telebirr…",
+  login: "Signing in…",
+  menu: "Opening Send Money…",
+  recipient: "Entering the number…",
+  amount: "Entering the amount…",
+  confirm: "Confirming…",
+  pin: "Authorising with PIN…",
+  returning: "Finishing up…",
+  done: "Sent",
+};
+
 export default function Notifications() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const { alerts, unread, state, markAllRead, dismiss, clear } = useRealtime();
+  const { alerts, unread, state, markAllRead, dismiss, clear, payOut } = useRealtime();
+
+  /**
+   * Real money leaves the agent's telebirr account here, on the word of a
+   * request that arrived over the network, so the amount and the destination are
+   * both read back before anything is sent.
+   */
+  const confirmPayOut = (item: Extract<CustomerRequest, { kind: "withdrawal" }>) => {
+    Alert.alert(
+      `Send ETB ${money(item.amount)}?`,
+      `AutoPilot will sign in to telebirr and send ETB ${money(item.amount)} to ${item.phone}.\n\n` +
+        "Only do this once you have the cash from the customer.",
+      [
+        { text: "Cancel", style: "cancel" },
+        { text: "Send", style: "destructive", onPress: () => payOut(item.id) },
+      ],
+    );
+  };
 
   // Opening the screen is what marks them read, so the badge clears the moment
   // the agent has actually seen them — not when the push arrived. Their ids are
@@ -52,15 +122,44 @@ export default function Notifications() {
   // not, how many are still running.
   const counts = alerts.reduce(
     (acc, item) => {
-      if (item.kind !== "deposit") return acc;
+      if (item.kind === "withdrawal") {
+        if (item.stage === "awaiting") acc.toPay += 1;
+        return acc;
+      }
       acc.total += 1;
       if (item.stage === "confirmed") acc.confirmed += 1;
       else if (item.stage === "not_found" || item.stage === "failed") acc.failed += 1;
       else acc.working += 1;
       return acc;
     },
-    { total: 0, confirmed: 0, failed: 0, working: 0 },
+    { total: 0, confirmed: 0, failed: 0, working: 0, toPay: 0 },
   );
+
+  // What the last history read actually saw. Shown only when a check could not
+  // find any receipt numbers, because that is the one failure whose cause is
+  // invisible from the app — the answer is in telebirr's own screen text.
+  const [scrape, setScrape] = useState<{ at: number; rows: number; texts: string[] } | null>(null);
+  const unreadable = alerts.some(
+    (item) =>
+      item.kind === "deposit" &&
+      item.stage === "failed" &&
+      (item.reason ?? "").startsWith("Could not read"),
+  );
+
+  useEffect(() => {
+    if (unreadable) loadLastListScrape().then(setScrape);
+  }, [unreadable]);
+
+  const shareScrape = () => {
+    if (!scrape) return;
+    Share.share({
+      message: [
+        `telebirr history scrape · ${scrape.rows} rows · ${relativeTime(scrape.at)}`,
+        "",
+        ...scrape.texts,
+      ].join("\n"),
+    });
+  };
 
   const newIds = useRef<Set<string>>(new Set());
   useEffect(() => {
@@ -73,9 +172,12 @@ export default function Notifications() {
     // arrow the transaction list already uses for outgoing; a deposit reference
     // is just something to look up, and stays neutral accent.
     const out = item.kind === "withdrawal";
-    const done = item.kind === "deposit" && item.stage === "confirmed";
+    const done =
+      item.kind === "deposit" ? item.stage === "confirmed" : item.stage === "sent";
     const bad =
-      item.kind === "deposit" && (item.stage === "not_found" || item.stage === "failed");
+      item.kind === "deposit"
+        ? item.stage === "not_found" || item.stage === "failed"
+        : item.stage === "failed" || item.stage === "interrupted";
     return (
       <View style={[s.card, s.row, newIds.current.has(item.id) && s.rowUnread]}>
         <View style={[s.icon, out && s.iconOut, done && s.iconDone, bad && s.iconBad]}>
@@ -86,12 +188,37 @@ export default function Notifications() {
           />
         </View>
         <View style={{ flex: 1, gap: 3 }}>
-          {out ? (
+          {item.kind === "withdrawal" ? (
             <>
               <Text style={s.reference}>ETB {money(item.amount)}</Text>
-              <Text style={s.time}>
-                Cash out to {item.phone} · {relativeTime(item.at)}
-              </Text>
+              {(() => {
+                const status = cashOutStatus(item);
+                return (
+                  <View style={s.statusLine}>
+                    {status.busy && <ActivityIndicator size="small" color={C.dim} />}
+                    <Text
+                      style={[
+                        s.time,
+                        status.tone === "green" && s.statusGood,
+                        status.tone === "red" && s.statusBad,
+                      ]}
+                    >
+                      {status.text} · {relativeTime(item.at)}
+                    </Text>
+                  </View>
+                );
+              })()}
+              {/* The payout itself. Only while it is waiting: once it is running
+                  or over, there is nothing to approve. */}
+              {item.stage === "awaiting" && (
+                <Pressable
+                  style={({ pressed }) => [s.payBtn, pressed && { opacity: 0.75 }]}
+                  onPress={() => confirmPayOut(item)}
+                >
+                  <Feather name="send" size={14} color="#fff" />
+                  <Text style={s.payBtnText}>Send ETB {money(item.amount)}</Text>
+                </Pressable>
+              )}
             </>
           ) : (
             <>
@@ -125,26 +252,20 @@ export default function Notifications() {
 
   return (
     <View style={s.screen}>
-      <View style={{ height: insets.top }} />
+      <ScreenHeader
+        title="Notifications"
+        subtitle={STATE_TEXT[state]}
+        back
+        right={
+          alerts.length > 0 ? (
+            <Pressable onPress={clear} hitSlop={HIT} style={{ paddingHorizontal: SP.xs }}>
+              <Text style={s.clear}>Clear all</Text>
+            </Pressable>
+          ) : undefined
+        }
+      />
 
-      <View style={s.header}>
-        <Pressable style={s.iconBtn} onPress={() => router.back()} hitSlop={6}>
-          <Feather name="chevron-left" size={24} color={C.text} />
-        </Pressable>
-        <View style={{ flex: 1 }}>
-          <Text style={s.title}>Notifications</Text>
-          <Text style={[s.subtitle, state === "offline" && { color: C.red }]}>
-            {STATE_TEXT[state]}
-          </Text>
-        </View>
-        {alerts.length > 0 && (
-          <Pressable onPress={clear} hitSlop={8} style={{ marginRight: -4 }}>
-            <Text style={s.clear}>Clear all</Text>
-          </Pressable>
-        )}
-      </View>
-
-      {counts.total > 0 && (
+      {(counts.total > 0 || counts.toPay > 0) && (
         <View style={s.summary}>
           <View style={s.summaryItem}>
             <Text style={[s.summaryNum, { color: C.green }]}>{counts.confirmed}</Text>
@@ -160,6 +281,39 @@ export default function Notifications() {
             <Text style={[s.summaryNum, { color: C.dim }]}>{counts.working}</Text>
             <Text style={s.summaryLabel}>checking</Text>
           </View>
+          <View style={s.summaryDivider} />
+          <View style={s.summaryItem}>
+            <Text style={[s.summaryNum, { color: counts.toPay > 0 ? C.accent : C.dim }]}>
+              {counts.toPay}
+            </Text>
+            <Text style={s.summaryLabel}>to pay</Text>
+          </View>
+        </View>
+      )}
+
+      {unreadable && (
+        <View style={s.diag}>
+          <Text style={s.diagTitle}>
+            {scrape && scrape.rows === 0
+              ? "The transaction list could not be read"
+              : "No reference numbers in the history"}
+          </Text>
+          <Text style={s.diagText}>
+            {scrape
+              ? scrape.rows === 0
+                ? `The history opened but none of its ${scrape.texts.length} lines of text looked like a transaction. Send them so the reading can be fixed for this build of telebirr.`
+                : `The last read saw ${scrape.rows} transaction${scrape.rows === 1 ? "" : "s"} but no reference numbers among them. Send the screen text so the matching can be fixed for this build.`
+              : "Run a check again to capture what telebirr's history screen actually shows."}
+          </Text>
+          {scrape && (
+            <Pressable
+              style={({ pressed }) => [s.diagBtn, pressed && { opacity: 0.7 }]}
+              onPress={shareScrape}
+            >
+              <Feather name="share" size={14} color="#fff" />
+              <Text style={s.diagBtnText}>Share what telebirr showed</Text>
+            </Pressable>
+          )}
         </View>
       )}
 
@@ -171,8 +325,9 @@ export default function Notifications() {
         ListHeaderComponent={
           alerts.length > 0 ? (
             <Text style={s.lead}>
-              Deposits check themselves: the phone opens telebirr, finds the receipt and
-              confirms the amount. Cash-outs are yours to pay.
+              Both kinds run on their own. A deposit opens telebirr and confirms the receipt; a
+              cash-out opens telebirr and sends the money straight to the customer. Take the cash
+              before the transfer lands — nothing here waits for you.
             </Text>
           ) : null
         }
@@ -199,7 +354,7 @@ const s = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 10,
-    paddingHorizontal: 20,
+    paddingHorizontal: SP.gutter,
     paddingTop: 4,
     paddingBottom: 14,
   },
@@ -211,12 +366,10 @@ const s = StyleSheet.create({
     justifyContent: "center",
     borderRadius: R.row,
   },
-  title: { fontSize: 19, fontWeight: "600", color: C.text, letterSpacing: -0.3 },
-  subtitle: { fontSize: 12, color: C.dim, marginTop: 1 },
   clear: { fontSize: 13, fontWeight: "600", color: C.accent },
 
   lead: {
-    paddingHorizontal: 20,
+    paddingHorizontal: SP.gutter,
     paddingBottom: 12,
     fontSize: 12,
     lineHeight: 18,
@@ -224,7 +377,7 @@ const s = StyleSheet.create({
   },
 
   card: {
-    marginHorizontal: 20,
+    marginHorizontal: SP.gutter,
     marginBottom: 8,
     backgroundColor: C.surface,
     borderWidth: 1,
@@ -246,10 +399,33 @@ const s = StyleSheet.create({
   iconDone: { backgroundColor: C.greenSoft },
   iconBad: { backgroundColor: C.redSoft },
 
+  diag: {
+    marginHorizontal: SP.gutter,
+    marginBottom: 12,
+    padding: 14,
+    gap: 8,
+    borderRadius: R.card,
+    backgroundColor: C.amberSoft,
+    borderWidth: 1,
+    borderColor: "#f0dcb4",
+  },
+  diagTitle: { fontSize: 14, fontWeight: "600", color: "#6d4d11" },
+  diagText: { fontSize: 12, lineHeight: 18, color: C.amber },
+  diagBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    height: 38,
+    borderRadius: R.btn,
+    backgroundColor: C.accent,
+  },
+  diagBtnText: { fontSize: 13, fontWeight: "600", color: "#fff" },
+
   summary: {
     flexDirection: "row",
     alignItems: "center",
-    marginHorizontal: 20,
+    marginHorizontal: SP.gutter,
     marginBottom: 14,
     paddingVertical: 12,
     borderRadius: R.row,
@@ -267,6 +443,19 @@ const s = StyleSheet.create({
   reference: { fontSize: 14, fontWeight: "600", color: C.text, ...TABULAR },
   time: { fontSize: 11, color: C.faint },
   dismiss: { padding: 4 },
+  payBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 7,
+    alignSelf: "flex-start",
+    height: 34,
+    marginTop: 7,
+    paddingHorizontal: 13,
+    borderRadius: R.btn,
+    backgroundColor: C.accent,
+  },
+  payBtnText: { fontSize: 12.5, fontWeight: "600", color: "#fff" },
 
   empty: { alignItems: "center", gap: 8, paddingTop: 64, paddingHorizontal: 48 },
   emptyIcon: {

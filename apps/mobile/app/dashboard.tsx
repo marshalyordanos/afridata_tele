@@ -9,7 +9,8 @@ import {
   Alert,
 } from "react-native";
 import { StatusBar } from "expo-status-bar";
-import { Link } from "expo-router";
+import { useRouter } from "expo-router";
+import { C, R, SP, T, SHADOW } from "../lib/theme";
 import { Macro, loadMacros, saveMacros, runMacro, RunResult } from "../lib/macros";
 import { useAccessibility } from "../lib/accessibility";
 import { useAgent } from "../lib/agent";
@@ -24,7 +25,7 @@ import {
 const DEMOS: Macro[] = [
   {
     id: "demo-scrape-settings",
-    name: "Open Settings → scrape all text",
+    name: "Open Settings · scrape all text",
     steps: [
       { type: "openApp", pkg: "com.android.settings" },
       { type: "wait", ms: 1500 },
@@ -33,7 +34,7 @@ const DEMOS: Macro[] = [
   },
   {
     id: "demo-telebirr",
-    name: "Open telebirr \u2192 scrape home",
+    name: "Open telebirr · scrape home",
     steps: [
       {
         type: "openApp",
@@ -47,7 +48,7 @@ const DEMOS: Macro[] = [
   },
   {
     id: "demo-chrome-search",
-    name: "Chrome → tap search → scrape",
+    name: "Chrome · tap search · scrape",
     steps: [
       { type: "openApp", pkg: "com.android.chrome" },
       { type: "wait", ms: 2000 },
@@ -57,6 +58,7 @@ const DEMOS: Macro[] = [
 ];
 
 export default function Dashboard() {
+  const router = useRouter();
   // Same live state as the home banner: bound-and-callable, not just switched on.
   const access = useAccessibility();
   const enabled = access.on;
@@ -119,7 +121,7 @@ export default function Dashboard() {
 
   return (
     <ScrollView style={styles.screen} contentContainerStyle={{ padding: 16 }}>
-      <StatusBar style="light" />
+      <StatusBar style="dark" />
       {/* Service status */}
       <View style={[styles.card, enabled ? styles.ok : styles.warn]}>
         <Text style={styles.cardTitle}>
@@ -150,7 +152,7 @@ export default function Dashboard() {
         <Text style={styles.cardTitle}>telebirr</Text>
         <Text style={styles.dim}>
           One tap: open telebirr, fill your number, and sign in with your PIN —
-          or carry straight on through Send Money → Individual and fill in the
+          or carry straight on through Send Money · Individual and fill in the
           transfer.
         </Text>
         <Pressable
@@ -182,11 +184,12 @@ export default function Dashboard() {
               : `💸 Send to ${TELEBIRR_RECIPIENT.full}`}
           </Text>
         </Pressable>
-        <Link href="/" asChild>
-          <Pressable style={[styles.btn, styles.btnDark]}>
-            <Text style={styles.btnText}>Account & transactions</Text>
-          </Pressable>
-        </Link>
+        <Pressable
+          style={[styles.btn, styles.btnDark]}
+          onPress={() => router.push("/")}
+        >
+          <Text style={[styles.btnText, styles.btnDarkText]}>Account & transactions</Text>
+        </Pressable>
         <Pressable style={styles.btn} onPress={openTelebirr} disabled={!!running}>
           <Text style={styles.btnText}>Just open telebirr</Text>
         </Pressable>
@@ -218,12 +221,13 @@ export default function Dashboard() {
         </Pressable>
       ))}
 
-      <Link href="/scrape" asChild>
-        <Pressable style={[styles.macro, { borderColor: "#2b6cff" }]}>
-          <Text style={styles.macroName}>🔍 Live Scrape tool</Text>
-          <Text style={styles.dim}>Open any app, then dump its screen text</Text>
-        </Pressable>
-      </Link>
+      <Pressable
+        style={[styles.macro, { borderColor: C.accentBorder, backgroundColor: C.accentSoft }]}
+        onPress={() => router.push("/scrape")}
+      >
+        <Text style={styles.macroName}>Live Scrape tool</Text>
+        <Text style={styles.dim}>Open any app, then dump its screen text</Text>
+      </Pressable>
 
       {result && (
         <View style={styles.card}>
@@ -253,62 +257,65 @@ export default function Dashboard() {
 }
 
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: "#0b0f1a" },
+  screen: { flex: 1, backgroundColor: C.ground },
   card: {
-    backgroundColor: "#141b2e",
-    borderRadius: 14,
-    padding: 16,
-    marginBottom: 16,
+    backgroundColor: C.surface,
+    borderRadius: R.card,
+    padding: SP.lg,
+    marginBottom: SP.lg,
     borderWidth: 1,
-    borderColor: "#233047",
+    borderColor: C.border,
+    ...SHADOW.card,
   },
-  ok: { borderColor: "#1f7a4d" },
-  warn: { borderColor: "#7a5a1f" },
-  cardTitle: { color: "#e6edf7", fontSize: 16, fontWeight: "700" },
-  dim: { color: "#8ba0c0", marginTop: 4, fontSize: 13 },
-  h2: { color: "#e6edf7", fontSize: 18, fontWeight: "700", marginVertical: 10 },
-  h3: { color: "#c9d6ec", fontSize: 14, fontWeight: "600" },
+  ok: { backgroundColor: C.greenSoft, borderColor: "#bfe0cd" },
+  warn: { backgroundColor: C.amberSoft, borderColor: "#f0dcb4" },
+  cardTitle: { ...T.heading, color: C.text },
+  dim: { ...T.small, color: C.dim, marginTop: SP.xs, lineHeight: 18 },
+  h2: { ...T.title, color: C.text, marginVertical: SP.sm },
+  h3: { ...T.body, fontWeight: "600", color: C.text },
   rowBetween: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
   },
-  link: { color: "#2b6cff", fontSize: 13 },
+  link: { ...T.small, fontWeight: "700", color: C.accent },
   btn: {
-    backgroundColor: "#2b6cff",
-    borderRadius: 10,
-    paddingVertical: 12,
+    backgroundColor: C.accent,
+    borderRadius: R.btn,
+    height: 46,
     alignItems: "center",
-    marginTop: 12,
+    justifyContent: "center",
+    marginTop: SP.md,
   },
-  btnText: { color: "white", fontWeight: "700" },
+  btnText: { ...T.body, fontWeight: "600", color: "#fff" },
   macro: {
-    backgroundColor: "#141b2e",
-    borderRadius: 12,
-    padding: 14,
-    marginBottom: 10,
+    backgroundColor: C.surface,
+    borderRadius: R.row,
+    padding: SP.md,
+    marginBottom: SP.sm,
     borderWidth: 1,
-    borderColor: "#233047",
+    borderColor: C.border,
   },
-  macroName: { color: "#e6edf7", fontSize: 15, fontWeight: "600" },
-  play: { color: "#4ade80", marginTop: 6, fontWeight: "700" },
-  logLine: { color: "#9fb3d1", fontSize: 12, fontFamily: "monospace", marginTop: 2 },
-  scrapeLine: { color: "#c9d6ec", fontSize: 13, marginTop: 2 },
-  viewId: { color: "#6f86a8", fontSize: 11, fontFamily: "monospace" },
-  err: { color: "#f87171", fontSize: 13, marginTop: 10 },
-  btnGreen: { backgroundColor: "#1f7a4d" },
-  btnDark: { backgroundColor: "#233047" },
+  macroName: { ...T.body, fontWeight: "600", color: C.text },
+  play: { ...T.small, fontWeight: "700", color: C.green, marginTop: SP.xs },
+  logLine: { ...T.mono, fontSize: 11.5, color: C.dim, marginTop: 2 },
+  scrapeLine: { ...T.small, color: C.text, marginTop: 2 },
+  viewId: { ...T.mono, fontSize: 10.5, color: C.faint },
+  err: { ...T.small, color: C.red, marginTop: SP.sm },
+  btnGreen: { backgroundColor: C.green },
+  btnDark: { backgroundColor: C.surfaceAlt, borderWidth: 1, borderColor: C.border },
+  btnDarkText: { color: C.text },
   btnViolet: { backgroundColor: "#5b3fa8" },
   input: {
-    backgroundColor: "#0b0f1a",
+    backgroundColor: C.surfaceAlt,
     borderWidth: 1,
-    borderColor: "#233047",
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    marginTop: 12,
-    color: "#e6edf7",
+    borderColor: C.border,
+    borderRadius: R.btn,
+    paddingHorizontal: SP.md,
+    height: 46,
+    marginTop: SP.md,
+    color: C.text,
     fontSize: 15,
   },
-  hint: { color: "#c79a3a", fontSize: 12, marginTop: 10 },
+  hint: { ...T.small, color: C.amber, marginTop: SP.sm, lineHeight: 18 },
 });

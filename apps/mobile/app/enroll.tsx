@@ -13,7 +13,7 @@ import {
 import { useRouter } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
-import { C, R, CARD_SHADOW } from "../lib/theme";
+import { C, R, SP, T, CARD_SHADOW } from "../lib/theme";
 import { enrollAgent, nationalDigits } from "../lib/agent";
 import { API_URL } from "../lib/api";
 
@@ -63,9 +63,13 @@ export default function Enroll() {
       style={s.screen}
       behavior={Platform.OS === "ios" ? "padding" : undefined}
     >
+      {/* The inset is painted outside the scroller, so the card cannot slide up
+          under the clock when the keyboard shortens the view. */}
+      <View style={{ height: insets.top }} />
       <ScrollView
-        contentContainerStyle={{ paddingBottom: 32, paddingTop: insets.top + 28 }}
+        contentContainerStyle={{ paddingTop: SP.xxl, paddingBottom: SP.xxl }}
         keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator={false}
       >
         <View style={s.brand}>
           <View style={s.logo}>
@@ -180,13 +184,13 @@ const s = StyleSheet.create({
     justifyContent: "center",
     backgroundColor: C.accentSoft,
   },
-  title: { fontSize: 22, fontWeight: "600", color: C.text, letterSpacing: -0.4 },
-  subtitle: { fontSize: 13, color: C.dim, textAlign: "center" },
+  title: { fontSize: 23, fontWeight: "700", color: C.text, letterSpacing: -0.5 },
+  subtitle: { ...T.small, color: C.dim, textAlign: "center", lineHeight: 19 },
 
   card: {
-    marginHorizontal: 20,
-    padding: 20,
-    gap: 10,
+    marginHorizontal: SP.gutter,
+    padding: SP.xl,
+    gap: SP.md,
     backgroundColor: C.surface,
     borderWidth: 1,
     borderColor: C.border,
@@ -198,7 +202,7 @@ const s = StyleSheet.create({
     fontWeight: "600",
     letterSpacing: 0.9,
     textTransform: "uppercase",
-    color: C.dim,
+    color: C.faint,
   },
   field: {
     flexDirection: "row",
@@ -242,10 +246,10 @@ const s = StyleSheet.create({
     backgroundColor: C.accent,
   },
   primaryBtnOff: { backgroundColor: "#a9c0f5" },
-  primaryBtnText: { fontSize: 15, fontWeight: "600", color: "#fff" },
+  primaryBtnText: { fontSize: 15, fontWeight: "700", color: "#fff" },
   pressed: { opacity: 0.75 },
 
-  footnote: { fontSize: 11, color: C.faint, lineHeight: 16 },
+  footnote: { ...T.micro, color: C.faint, lineHeight: 16 },
   errorBox: {
     flexDirection: "row",
     gap: 8,

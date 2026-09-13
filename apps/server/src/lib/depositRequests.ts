@@ -14,8 +14,14 @@ import type { DepositRequestStatus } from "../generated/prisma/enums.js";
  * twice, which is the difference between one deposit and two.
  */
 
-/** How long a handset has to answer before the check is abandoned. */
-export const REQUEST_TTL_MS = 3 * 60 * 1000;
+/**
+ * How long a handset has to answer before the check is abandoned.
+ *
+ * Long, because the phone may open twenty receipts in telebirr looking for the
+ * reference. It has to outlast the customer page's own timeout, so that a slow
+ * answer still lands on a request that is alive to receive it.
+ */
+export const REQUEST_TTL_MS = 5 * 60 * 1000;
 
 export function isExpired(createdAt: Date): boolean {
   return Date.now() - createdAt.getTime() > REQUEST_TTL_MS;
