@@ -48,6 +48,20 @@ export default function Notifications() {
   // kept first, so the accent edge still shows what is new to this visit after
   // the stored flag has been cleared; one that arrives while the screen is open
   // is marked read too, rather than leaving a badge for something in plain view.
+  // The headline the agent actually wants: how many went through, how many did
+  // not, how many are still running.
+  const counts = alerts.reduce(
+    (acc, item) => {
+      if (item.kind !== "deposit") return acc;
+      acc.total += 1;
+      if (item.stage === "confirmed") acc.confirmed += 1;
+      else if (item.stage === "not_found" || item.stage === "failed") acc.failed += 1;
+      else acc.working += 1;
+      return acc;
+    },
+    { total: 0, confirmed: 0, failed: 0, working: 0 },
+  );
+
   const newIds = useRef<Set<string>>(new Set());
   useEffect(() => {
     for (const alert of alerts) if (!alert.read) newIds.current.add(alert.id);
@@ -60,13 +74,15 @@ export default function Notifications() {
     // is just something to look up, and stays neutral accent.
     const out = item.kind === "withdrawal";
     const done = item.kind === "deposit" && item.stage === "confirmed";
+    const bad =
+      item.kind === "deposit" && (item.stage === "not_found" || item.stage === "failed");
     return (
       <View style={[s.card, s.row, newIds.current.has(item.id) && s.rowUnread]}>
-        <View style={[s.icon, out && s.iconOut, done && s.iconDone]}>
+        <View style={[s.icon, out && s.iconOut, done && s.iconDone, bad && s.iconBad]}>
           <Feather
-            name={out ? "arrow-up-right" : done ? "check" : "hash"}
+            name={out ? "arrow-up-right" : done ? "check" : bad ? "alert-circle" : "hash"}
             size={17}
-            color={out ? C.red : done ? C.green : C.accent}
+            color={out ? C.red : done ? C.green : bad ? C.red : C.accent}
           />
         </View>
         <View style={{ flex: 1, gap: 3 }}>
@@ -127,6 +143,25 @@ export default function Notifications() {
           </Pressable>
         )}
       </View>
+
+      {counts.total > 0 && (
+        <View style={s.summary}>
+          <View style={s.summaryItem}>
+            <Text style={[s.summaryNum, { color: C.green }]}>{counts.confirmed}</Text>
+            <Text style={s.summaryLabel}>confirmed</Text>
+          </View>
+          <View style={s.summaryDivider} />
+          <View style={s.summaryItem}>
+            <Text style={[s.summaryNum, { color: C.red }]}>{counts.failed}</Text>
+            <Text style={s.summaryLabel}>failed</Text>
+          </View>
+          <View style={s.summaryDivider} />
+          <View style={s.summaryItem}>
+            <Text style={[s.summaryNum, { color: C.dim }]}>{counts.working}</Text>
+            <Text style={s.summaryLabel}>checking</Text>
+          </View>
+        </View>
+      )}
 
       <FlatList
         data={alerts}
@@ -209,6 +244,23 @@ const s = StyleSheet.create({
   },
   iconOut: { backgroundColor: C.redSoft },
   iconDone: { backgroundColor: C.greenSoft },
+  iconBad: { backgroundColor: C.redSoft },
+
+  summary: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginHorizontal: 20,
+    marginBottom: 14,
+    paddingVertical: 12,
+    borderRadius: R.row,
+    borderWidth: 1,
+    borderColor: C.border,
+    backgroundColor: C.surface,
+  },
+  summaryItem: { flex: 1, alignItems: "center", gap: 2 },
+  summaryNum: { fontSize: 18, fontWeight: "700", ...TABULAR },
+  summaryLabel: { fontSize: 11, color: C.dim },
+  summaryDivider: { width: 1, alignSelf: "stretch", backgroundColor: C.divider },
   statusLine: { flexDirection: "row", alignItems: "center", gap: 6 },
   statusGood: { color: C.green, fontWeight: "600" },
   statusBad: { color: C.red },
